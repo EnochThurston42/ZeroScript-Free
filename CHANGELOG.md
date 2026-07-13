@@ -2,6 +2,62 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.2] - 2026-07-13
+
+Follow-up robustness fixes for the Studio-connection failures the 1.4.1 work
+did not cover: a rare "0 tools that survives every restart" deadlock, and a
+third-party app silently hijacking Studio's MCP port.
+
+### Fixed
+- **A third-party app (e.g. ropilot) hijacking Studio's MCP port**: whichever
+  program binds Studio's MCP port (13469) FIRST wins it, and if that is not
+  Studio, `StudioMCP.exe` connects to the wrong host - the handshake succeeds
+  but no tools ever appear. A PC reboot never helps because the offending app
+  restarts with Windows and can grab the port before Studio again. The existing
+  one-shot port check at boot could miss it. The bridge now detects the hijack
+  from an unmistakable, timing-independent signal - `StudioMCP.exe` reporting it
+  cannot parse the host's messages on that port - then kills the offending
+  process (by port owner, with a fallback that kills the known squatter by
+  name), restarts the proxy, and tells the user which app to uninstall or remove
+  from Windows startup so it stops coming back. It never stays silent: if it
+  cannot identify or kill the squatter it prints how to find it by hand.
+- **`_port_owner` was IPv4-only**: the internal port-owner probe ran
+  `netstat -p TCP`, so a squatter listening on IPv6 loopback was invisible to
+  it; it now scans TCP and TCPv6.
+- **A missing custom-MCP command (e.g. `uvx` not installed) looked like an
+  endless silent restart loop**: when a configured server's command could not
+  be found on PATH, the process never started, so there was no exit code and no
+  stderr, and the crash-loop banner printed "the server printed no error output
+  before dying". The bridge now catches the launch failure and names the real
+  cause ("command not found: 'uvx' ...") both on the first attempt and in the
+  crash-loop banner, while auto-restart keeps retrying in case the dependency
+  is installed later.
+
+### Changed
+- After killing a port squatter, the "toggle Studio's MCP server OFF/ON"
+  instruction now prints IMMEDIATELY (right after the kill) instead of only
+  after the ~48s server-launch grace loop - so the user acts within seconds
+  instead of staring at a seemingly-idle terminal for a minute. Toggling early
+  also lets the grace loop pick up the tools and go green right away.
+- **0 tools that no restart could fix**: if a `StudioMCP.exe` from a crashed
+  session kept listening on Studio's MCP port (13469), reopening Studio made
+  its MCP plugin do its one-shot registration against that *zombie* process.
+  Because a Studio window was now running, both existing cleanups skipped it
+  (the orphan-killer only acts when no Studio runs; the port check treats any
+  Roblox-path owner as legitimate), so our fresh proxy could never own the
+  port - 0 tools forever, unfixable by restarting Studio or the bridge in any
+  order. The bridge now identifies the port owner by process ID: a
+  `StudioMCP.exe` holding the port that this bridge did not launch (outside our
+  own process tree) is a leftover by definition, so it is killed and the proxy
+  restarted - at boot and again in the live watcher if the catalogue stays
+  empty with Studio open. It then tells the user the one action that finishes
+  recovery: open Assistant Settings > MCP Servers so Studio re-registers. If
+  the process tree can't be read, nothing is killed (a healthy connection is
+  never put at risk).
+- The extension now tells non-technical users to "Run start.bat" instead of
+  "Run python bridge.py" / "Run the ZeroScript bridge" in the offline panel,
+  popup, and startup banner, matching the one-click launcher the README ships.
+
 ## [1.4.1] - 2026-07-11
 
 Robustness release focused on the Roblox Studio connection lifecycle. Every

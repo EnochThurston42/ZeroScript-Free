@@ -1306,7 +1306,7 @@
       if (!alive()) return;
       if (!A.toolList.length) {
         ui.banner("warn", "Bridge or Studio offline",
-          "Could not fetch Roblox tools. Start the ZeroScript bridge and make sure Roblox Studio is open, then try again.");
+          "Could not fetch Roblox tools. Run start.bat and make sure Roblox Studio is open, then try again.");
         return;
       }
       const modeState = await P.ensureComposerReady("startup");
@@ -2440,7 +2440,7 @@
           // unavailable until Studio is back. Button enabled, but visibly warned.
           toneClass = "warn"; warn = true;
           msg = !A.bridge.connected
-            ? `Run the <b>ZeroScript bridge</b> on your PC.`
+            ? `Run <b>start.bat</b> on your PC.`
             : studioProcUp
               ? `<b>Studio open but not connected</b> - open <b>Assistant Settings &gt; MCP Servers</b> in Studio, or start without it.`
               : `<b>Roblox Studio offline</b> - start with your other MCP server(s).`;
@@ -2448,7 +2448,7 @@
         } else {
           toneClass = "warn"; warn = true;
           msg = !A.bridge.connected
-            ? `Run the <b>ZeroScript bridge</b> on your PC.`
+            ? `Run <b>start.bat</b> on your PC.`
             : placeDown
               ? `Open a <b>place</b> in Roblox Studio.`
               : (appDown || studioDown) && studioProcUp

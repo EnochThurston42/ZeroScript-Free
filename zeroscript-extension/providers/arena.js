@@ -150,7 +150,7 @@ const ZSProvider = (() => {
   const CONT_A_RE = /^\s*(continuer avec a|continue with a)\s*$/i;
   // Any committing click is a backend call that can be throttled. enforceComposer
   // runs this every sweep (mutations + the 1.5s tick), so we (1) click at most
-  // once per BATTLE_COOLDOWN_MS and (2) never click while a throttle toast shows —
+  // once per BATTLE_COOLDOWN_MS and (2) never click while a throttle toast shows:
   // clicking again only deepens the limit. The cooldown still retries a genuinely
   // pending battle, but slowly enough never to trip the limiter.
   const THROTTLE_RE =
@@ -622,7 +622,7 @@ const ZSProvider = (() => {
   }
 
   // A bot-check challenge is on screen (Cloudflare Turnstile / hCaptcha /
-  // reCAPTCHA). We NEVER interact with it — the core reads this only to move the
+  // reCAPTCHA). We NEVER interact with it: the core reads this only to move the
   // ZeroScript bar out of the way: the anchored bar is transparent but still a
   // real, full-width element over the composer's top edge, so it silently eats
   // clicks on the challenge's "Valider" button even though nothing is visible.

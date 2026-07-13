@@ -73,50 +73,18 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.2
+
+- **Self-healing Studio connection:** the bridge now recovers on its own from a third-party app hijacking Studio's MCP port, and from a leftover StudioMCP process that used to leave the tool count stuck at 0 no matter how many times you restarted Studio or the bridge.
+- **Clearer failure messages:** a missing custom-MCP command (e.g. `uvx` not installed) now names the real problem instead of looking like a silent restart loop.
+
 ## New in 1.4.1
 
 - **Much more reliable Roblox Studio connection:** the bridge now recovers on its own from the connection issues Studio itself can cause - a stuck/orphaned MCP process, Studio opened after the bridge, or Studio's MCP toggle losing its registration. When it can't fix something automatically (e.g. Studio's MCP plugin needs a manual nudge), the status bar tells you exactly what to click instead of leaving you guessing or forcing a bridge restart.
 - **Faster startup with addon servers:** the bridge no longer waits on Roblox Studio before other MCP servers (like Blender) become usable - addons are ready in seconds instead of up to a minute.
 - **Sturdier bridge:** background monitoring can no longer silently stop working after an error; start.bat is hardened against more first-run edge cases (missing winget, an unextracted ZIP, stale installs).
 
-## New in 1.4.0
-
-- **Connect other MCP servers alongside Roblox Studio (experimental):** add an addon MCP server (Blender, Sketchfab, or any local MCP command) from the panel's menu. Roblox Studio stays the always-on primary connection; addons are optional extras the AI reaches for only when the task actually needs them, and a Roblox outage never gets confused with an addon outage. When Roblox is down but an addon is still alive, the agent can start in a degraded mode instead of refusing to start at all.
-- **Vision support on more providers:** Arena, Gemini, GLM, Kimi and Qwen can now all actually see an attached screen capture or other tool-returned image, with a more reliable upload flow that no longer silently drops the attachment on send.
-- **Smarter command recovery:** a command cut off by the model's own output limit, with only its closing brackets missing, is now auto-completed and run instead of forcing a full retry. Broken-command feedback is also more specific about what actually went wrong (cut off, bad JSON, missing marker, wrong format), so the AI fixes the real problem faster.
-- **More accurate tool chips:** fixed a DeepSeek bug where a command's chip could show as finished while the AI was still writing it, plus several chip-state fixes shared across providers (regenerate flicker, orphaned commands after a reload, image-result labeling).
-- **Cleaner panel:** the version number next to the ZeroScript name is now small, plain text instead of a bordered badge.
-
-## New in 1.3.9
-
-- **More reliable bridge:** a Roblox process left running in the background after a restart no longer fights the next launch, and a dropped internal connection now retries silently instead of failing a command with a confusing error.
-- **Clearer status bar:** when the agent is active but Studio, the place, or the bridge is not actually usable, the bar now says exactly what to do (open a place, enable the MCP server, or restart the bridge) instead of showing a falsely healthy tool count.
-- **Cross-provider UI polish:** menus, model pickers and tooltips (Kimi, GLM, Arena) no longer render clipped behind ZeroScript's bar; the "Agent is working" cover can no longer be clicked through or balloon past the composer; the tool chip no longer flashes or flaps when a thinking model quotes its own command, or when revisiting a past turn.
-- Several Gemini/Kimi/Arena session and chip glitches are fixed (see changelog for details).
-
-## New in 1.3.5
-
-- **New AI provider: Arena** (arena.ai): a sixth free provider, and the first multi-model playground. Pick any model Arena offers and drive Roblox Studio with it. Use **Direct** mode: ZeroScript blocks Start in Battle / Side-by-Side / Agent modes and auto-commits any A/B comparison to candidate A so the agent always reads a single reply.
-- **Stop button fixes (Arena):** clicking **■ Stop** now reliably halts generation even during the brief "Generating..." moment before the native stop button appears, and a tool chip can no longer keep spinning after a stop inside an A/B comparison.
-
-## New in 1.3.4
-
-- **New AI provider: Qwen** (chat.qwen.ai, Alibaba Cloud): a fifth free provider joins the lineup. Uses a network tap (SSE stream) for reliable command extraction, immune to Monaco editor virtualisation.
-- **GLM send reliability fix:** in long conversations GLM could take a very long time to actually send a message (it was in the input but wouldn't go). The send logic now re-nudges Svelte up to 8 s until the button re-enables, fixing the delay.
-
-## New in 1.3.0
-
-- **Two new AI providers: Kimi** (kimi.com, Moonshot AI) and **GLM** (chat.z.ai, Z.ai) join DeepSeek and Gemini.
-- **Native tools locked down** the AI is now told to use *only* the ZeroScript Roblox commands, never its own built-in tools (code sandbox, web search, connectors).
-- **Smoother control panel** dragging is more fluid and no longer snaps back after a session starts.
-- Various UI fixes (Kimi input gate, "AI sites" menu) and a more robust command parser.
-
-## New in 1.2.0
-
-- **Project memory** the agent keeps durable notes about your place (architecture, conventions, decisions, your preferences) and reuses them in later sessions, so it actually remembers your project.
-- **Custom prompt** (⚙ in the panel) add your own instructions, appended under the system prompt and saved between sessions.
-- **Other AI sites button** (🌐 in the panel) quickly open any chat site ZeroScript supports.
-- Better, tested command guidance and a more robust agent loop that recovers from malformed commands instead of stalling.
+See [CHANGELOG.md](CHANGELOG.md) for older releases.
 
 ## Panel status
 
