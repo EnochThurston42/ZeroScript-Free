@@ -66,6 +66,9 @@
   const EXT_VERSION = chrome.runtime.getManifest().version;
   // YouTube tutorial - how to set up the Bridge.
   const VIDEO_URL = "https://youtu.be/kPKiZLZ9_Ps";
+  // Work.ink locked link - free "watch an ad" support option. Set once the
+  // locker is created at https://work.ink; the button is hidden until then.
+  const WORKINK_URL = "https://work.ink/2JXi/zeroscript-free-roblox-ai-coding-tool";
   // Roblox "tip" Game Passes - the native currency for the audience.
   const ROBUX_PASSES = [
     { robux: 30, id: 1865342947 },
@@ -2181,8 +2184,12 @@
            ${sites}
          </section>
          <section class="zs-menu-sec">
-           <div class="zs-sec-label"><span>Support</span></div>
+           <div class="zs-sec-label"><span>Free Support</span></div>
            <button class="zs-tip-opt zs-tip-star" data-u="${GITHUB_URL}"><span>Star on GitHub</span><span class="zs-tip-sub">free, helps a lot</span></button>
+           ${WORKINK_URL ? `<button class="zs-tip-opt zs-tip-ad" data-u="${WORKINK_URL}"><span>Watch an ad to support</span><span class="zs-tip-sub">free, takes a minute</span></button>` : ""}
+         </section>
+         <section class="zs-menu-sec">
+           <div class="zs-sec-label"><span>Support with Robux / Ko-fi</span></div>
            <button class="zs-tip-opt zs-tip-kofi" data-u="${KOFI_URL}"><span>Tip on Ko-fi</span><span class="zs-tip-sub">any amount</span></button>
            <div class="zs-tip-sep">or tip in Robux</div>
            <div class="zs-rbx-grid">${passes}</div>
@@ -2396,7 +2403,7 @@
           // without this check the bridge dropping fell through to the
           // stale "N tools" text below, reading as if nothing was wrong.
           toneClass = "warn"; warn = true;
-          msg = `<b>Agent active</b> · bridge offline, run the ZeroScript bridge`;
+          msg = `<b>Agent active</b> · bridge offline, run start.bat`;
         } else if ((placeDown || appDown || studioDown) && addonOk) {
           // DEGRADED session by CHOICE: the user started the agent with Roblox
           // down but other MCP server(s) alive (the "Start agent (Roblox
@@ -2558,7 +2565,7 @@
       // Assistant Settings > MCP Servers inside the already-open Studio.
       const procUp = s.studioProc === true;
       let txt;
-      if (!s.connected) txt = "Bridge offline, run the ZeroScript bridge";
+      if (!s.connected) txt = "Bridge offline, run start.bat";
       else if (!mcpOk) txt = "Bridge OK, open Roblox Studio";
       else if (noPlace) txt = "Roblox Studio is open but no place is loaded - open a place";
       else if (noApp) txt = procUp
