@@ -117,8 +117,30 @@ const ZSProvider = (() => {
   let _codeObs = null;
   function ensureCodeObserver() {
     if (_codeObs) return;
-    const snapAll = () =>
-      document.querySelectorAll(S.codeWrap).forEach(snapshotCode);
+    // [TRACE] Suspect #1 for the "15-20s freeze after N tools": this observer
+    // fires on EVERY characterData/childList mutation across document.body and
+    // re-scans EVERY code block in the whole conversation. Cost grows with the
+    // number of execute_luau blocks. We time each pass and, once per second, log
+    // the fire-rate, block count and worst single-pass duration - but only when
+    // it's actually notable, so a quiet page stays silent.
+    let _snCount = 0, _snMaxMs = 0, _snMaxBlocks = 0, _snWinStart = Date.now();
+    const snapAll = () => {
+      const t0 = (self.performance || Date).now();
+      const blocks = document.querySelectorAll(S.codeWrap);
+      blocks.forEach(snapshotCode);
+      const ms = (self.performance || Date).now() - t0;
+      _snCount++;
+      if (ms > _snMaxMs) _snMaxMs = ms;
+      if (blocks.length > _snMaxBlocks) _snMaxBlocks = blocks.length;
+      const now = Date.now();
+      if (now - _snWinStart >= 1000) {
+        if (_snCount > 120 || _snMaxMs > 25 || _snMaxBlocks > 40) {
+          diag("code.snapAll", { firesPerSec: _snCount, blocks: _snMaxBlocks,
+            maxMs: Math.round(_snMaxMs), sumMsApprox: Math.round(_snCount * _snMaxMs) });
+        }
+        _snCount = 0; _snMaxMs = 0; _snMaxBlocks = 0; _snWinStart = now;
+      }
+    };
     _codeObs = new MutationObserver(snapAll);
     try {
       _codeObs.observe(document.body, { subtree: true, childList: true, characterData: true });
@@ -204,9 +226,12 @@ const ZSProvider = (() => {
   // yields its full source from the dataset cache (see the cache section above).
   function textWithout(root, excludeSel) {
     if (!root) return "";
+    const _t0 = (self.performance || Date).now(); // [TRACE]
     const skip = ".zs-chip" + (excludeSel ? ", " + excludeSel : "");
     let t = "";
+    let _nodes = 0; // [TRACE]
     const walk = (n) => {
+      _nodes++; // [TRACE]
       if (n.nodeType === 3) { t += n.nodeValue; return; }
       if (n.nodeType !== 1) return;
       if (n.matches && n.matches(skip)) return;
@@ -217,6 +242,9 @@ const ZSProvider = (() => {
       for (const c of n.childNodes) walk(c);
     };
     walk(root);
+    // [TRACE] Only log a genuinely expensive walk so the normal path stays quiet.
+    const _ms = (self.performance || Date).now() - _t0;
+    if (_ms > 20) diag("dom.read.slow", { ms: Math.round(_ms), nodes: _nodes, chars: t.length });
     return t;
   }
 
@@ -306,8 +334,21 @@ const ZSProvider = (() => {
   function lastAssistantId() {
     const last = lastAssistant();
     if (!last) return null;
-    const m = (last.id || "").match(/assistant-([0-9a-f-]{8,})/i);
-    return m ? m[1] : (last.id || null);
+    // Qwen DROPPED the turn node's own id="...assistant-<uuid>" (validated live
+    // 2026-07: assistant turns now carry NO id at all). The stable per-response
+    // identity moved to a DESCENDANT div id="chat-response-message-<uuid>", whose
+    // uuid matches the network tap's rid. Without reading it here, lastAssistantId()
+    // returned null every turn, so the core's newReply test fell back to the flat
+    // (virtualized) count and waited the full ~30s NO_TURN_GRACE on EVERY tool turn
+    // - the "tool result takes ~30s to inject even though the arrow is back" bug.
+    const rc = last.querySelector('[id^="chat-response-message-"]');
+    if (rc) {
+      const m = rc.id.match(/chat-response-message-([0-9a-f-]{8,})/i);
+      if (m) return m[1];
+    }
+    // Fallbacks: the old attribute (older builds / cached turns), then the raw id.
+    const m2 = (last.id || "").match(/assistant-([0-9a-f-]{8,})/i);
+    return m2 ? m2[1] : (last.id || null);
   }
 
   const chatIsEmpty = () => allItems().length === 0;
@@ -555,9 +596,32 @@ const ZSProvider = (() => {
     window.HTMLTextAreaElement.prototype, "value"
   )?.set;
 
+  // Qwen's composer hard-caps a message at 131072 characters: past that it refuses
+  // to send with "Prompt cannot exceed 131072 characters" (validated live), so a
+  // large tool result (e.g. a big http_get / get_page_text / luau dump) silently
+  // wedges the loop in the input box. Truncate outgoing text to a safe margin below
+  // the cap, keeping the head AND tail so neither the start nor the end of a result
+  // is lost, and mark the gap so the model knows content was dropped and does not
+  // retry the whole call. Qwen-only cap; other providers keep their own.
+  const SEND_CAP = 131072;   // composer hard limit
+  const SEND_MAX = 130000;   // leave margin for the truncation marker
+  function truncateForSend(text) {
+    if (!text || text.length <= SEND_CAP) return text;
+    const omitted = text.length - SEND_MAX;
+    const marker =
+      `\n\n[…ZeroScript: result truncated to fit Qwen's ${SEND_CAP}-character input ` +
+      `limit - ${omitted} of ${text.length} characters omitted. Do NOT re-run the ` +
+      `command; work with the head and tail shown here…]\n\n`;
+    const budget = SEND_MAX - marker.length;
+    const headLen = Math.floor(budget * 0.85);
+    const tailLen = budget - headLen;
+    return text.slice(0, headLen) + marker + text.slice(text.length - tailLen);
+  }
+
   async function typeAndSend(text, images) {
     const ed = getEditor();
     if (!ed) throw new Error("Qwen input box not found");
+    text = truncateForSend(text);
     // Mark the response now in the tap as consumed: we are replying to it, so the
     // tap is stale until Qwen opens the next response (see netCurrent()).
     rememberSentResponse();

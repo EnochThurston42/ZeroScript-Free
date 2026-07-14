@@ -95,6 +95,12 @@ html.zs-light #zs-bar.zs-bar-anchored {
 #zs-bar.zs-prov-gemini #zs-action,
 #zs-bar.zs-prov-gemini #zs-state b { font-weight: 500; }
 
+/* Meta AI's composer card has a large corner radius (rounded-32 = 32px), so the
+   full-width anchored bar's left/right ends run under the curve - the brand and
+   the Discord/switch/support icons crowd the rounding. Inset the content by ~the
+   radius so both edges clear the corners cleanly. */
+#zs-bar.zs-bar-anchored.zs-prov-meta { padding-left: 30px; padding-right: 30px; }
+
 #zs-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; cursor: help; }
 #zs-dot.on { background: #34d399; box-shadow: 0 0 8px #34d399; }
 #zs-dot.warn { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
@@ -471,6 +477,28 @@ message-content.zs-cmd-mask code-block { display: none !important; }
    flash. Inert elsewhere. */
 .zs-cmd-mask div.not-prose:has(pre) { display: none !important; }
 
+/* Meta AI (www.meta.ai, React): React recreates the reply's rendered code subtree
+   on stream settle and on the next send, wiping any per-element .zs-tool-hide
+   class. The assistant-message body keeps its identity (the chip is anchored at
+   item level), so the provider marks IT with .zs-cmd-mask and this rule keeps
+   every recreated command wrapper (the .ur-code-block that holds either the JSON
+   viewer widget or a plain <pre>) hidden with no flash. Inert elsewhere. */
+.zs-cmd-mask .ur-code-block { display: none !important; }
+
+/* Meta AI whole-turn chips (result / sys) alignment. A whole:true chip is pinned
+   as a direct child of the TURN ROOT, but Meta's turn root is FULL width (~1608px)
+   while the reply body lives in a nested `mx-auto max-w-3xl` (768px) centered
+   column. So a result chip's collapsible body stretched the chip to the full page
+   width, and the "Starting Up" sys chip sat at the raw page-left edge - neither
+   lined up with the tool chip (which anchors inside that centered column). Re-seat
+   whole chips onto the same 768px column: push the left edge in by the column's
+   own centering offset and cap the width to the column. `max()` keeps it sane on
+   narrow viewports where the column is full-width. */
+html.zs-site-meta .zs-hidden > .zs-chip {
+  margin-left: max(0px, calc((100% - 768px) / 2));
+  max-width: 768px;
+}
+
 /* Qwen (Ant Design) renders its model / thinking-mode select popup AND the
    composer "+" attachment menu (Upload attachment / Deep Research / Create
    image / Web Dev / Slides / More) at z-index 1050-1150 - far below #zs-root
@@ -568,6 +596,11 @@ ol.flex-col-reverse > div.w-full:not(.mx-auto) > .zs-chip {
 .zs-chip {
   --cat: #8b8b93;
   display: block; width: fit-content; max-width: 100%;
+  /* Never stretch to the container width: some sites (Meta AI) render the reply
+     body as a flex column, and a block child with `width:fit-content` gets
+     stretched to full width by the default `align-items:stretch`. Pinning
+     align-self keeps the chip hugging its label. No-op in block/grid parents. */
+  align-self: flex-start;
   margin: 5px 0; padding: 0;
   font-size: 13px; font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
   border-radius: 9px; line-height: 1.3;

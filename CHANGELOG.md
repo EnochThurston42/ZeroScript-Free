@@ -2,6 +2,40 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.3] - 2026-07-15
+
+Adds a seventh AI provider (Meta AI) and fixes a Qwen tool-turn regression, plus
+further Studio-port recovery hardening and a friendlier system prompt.
+
+### Added
+- **Meta AI (www.meta.ai) as a provider**: full ZeroScript support on Meta AI -
+  new `providers/meta.js`, manifest content script + host permissions, and the
+  provider switcher entry. Handles Meta's React DOM: reasoning ("Réflexion")
+  chain-of-thought is excluded from the read text, the interactive JSON viewer
+  and collapsible code blocks are masked so a streamed command never flashes, and
+  the composer card is fully covered while typing. Meta AI accepts very large
+  prompts, so no Qwen-style send cap is needed.
+
+### Fixed
+- **Qwen tool result took ~30s to inject on every tool turn**: Qwen dropped the
+  assistant turn's own `id`, so `lastAssistantId()` returned null and the core
+  fell back to the virtualized flat count, waiting the full ~30s NO_TURN_GRACE
+  each turn. It now reads the stable `chat-response-message-<uuid>` descendant
+  (with the old id kept as a fallback).
+- **Qwen refused oversized messages**: a large tool result past Qwen's 131072
+  character composer cap silently wedged the loop in the input box. Outgoing text
+  is now truncated to a safe margin, keeping the head and tail and marking the gap
+  so the model does not re-run the command.
+
+### Changed
+- **Friendlier, less restrictive system prompt**: the "do not use native tools"
+  wording is reframed as a technical note (the site's own sandbox cannot reach the
+  user's Studio) rather than a hard prohibition, with an explicit "you can act
+  directly in the user's project" section. Reduces provider refusals.
+- **Studio-port recovery hardening**: PID-based reclaim of leftover `StudioMCP`
+  zombies and clearer, de-duplicated action banners on top of the 1.4.2 port
+  hijack recovery.
+
 ## [1.4.2] - 2026-07-13
 
 Follow-up robustness fixes for the Studio-connection failures the 1.4.1 work

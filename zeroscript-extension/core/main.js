@@ -56,6 +56,28 @@
   }
   P.init({ diag });
 
+  // ── [TRACE] Main-thread stall detector ─────────────────────────────────────
+  // The reported bug ("tools spin 15-20s, the chip timer stops rising") can only
+  // be a SYNCHRONOUS block of the page's main thread: an async bridge/network wait
+  // yields, so the 200ms UI interval (and its chip timer) would keep ticking. This
+  // fires every 250ms and, whenever the ACTUAL gap since the last tick is far more
+  // than expected, logs the stall. A `stall.detected` with a big `ms` right when
+  // the user sees the freeze = the smoking gun; correlate its timestamp with the
+  // surrounding diag events (esp. code.snapAll / dom.read.slow) to see WHAT ran.
+  {
+    const EXPECT = 250, STALL = 800; // only log gaps beyond this many ms
+    let _lastTick = Date.now();
+    setInterval(() => {
+      const now = Date.now();
+      const gap = now - _lastTick;
+      _lastTick = now;
+      if (gap > STALL) {
+        diag("stall.detected", { ms: gap, overBy: gap - EXPECT,
+          toolRunning: A.toolRunning, running: A.running, injecting: A.injecting });
+      }
+    }, EXPECT);
+  }
+
   // Ko-fi tip link.
   const KOFI_URL = "https://ko-fi.com/sebattfg";
   // GitHub releases page - where users download the Bridge + start.bat.
@@ -86,6 +108,7 @@
     { name: "GLM", url: "https://chat.z.ai/" },
     { name: "Qwen", url: "https://chat.qwen.ai/" },
     { name: "Arena", url: "https://arena.ai/text/direct" },
+    { name: "Meta AI", url: "https://www.meta.ai/" },
   ];
 
   const A = {
@@ -445,9 +468,24 @@
       // Bounded so a genuinely dead send still ends the turn.
       if (P.reliableCounts && !newReply) {
         if (!noTurnSince) noTurnSince = Date.now();
+        // [TRACE] This is the 30s NO_TURN_GRACE gate. If a Qwen tool turn sits here
+        // ~30s EVERY turn, newReply is wrongly stuck false: log the identity values
+        // that decide it so we can see whether curTok is null (id missing on the new
+        // turn -> count fallback) or equal to sendToken (last turn not advancing).
+        const _waited = Date.now() - noTurnSince;
+        if (_waited > 800 && (!A._noTurnLoggedAt || Date.now() - A._noTurnLoggedAt > 3000)) {
+          A._noTurnLoggedAt = Date.now();
+          diag("noTurnGrace.wait", {
+            waitedMs: _waited,
+            curTok: (P.lastAssistantId ? P.lastAssistantId() : undefined),
+            sendToken: A.sendToken,
+            assistantCount: P.assistantCount ? P.assistantCount() : undefined,
+            base, gen, started, replyLen: (d.reply || "").length });
+        }
         if (Date.now() - noTurnSince < NO_TURN_GRACE_MS) { await sleep(200); continue; }
       } else {
         noTurnSince = 0;
+        A._noTurnLoggedAt = 0;
       }
 
       if (!doneSince) doneSince = Date.now();
@@ -1986,6 +2024,10 @@
       if (swName) swName.textContent = P.displayName || P.id;
       menuEl = root.querySelector("#zs-menu");
       bar.classList.add(`zs-prov-${P.id}`); // lets CSS tune per-site (e.g. font)
+      // Provider hook on <html> so overlay.css can tune site-specific CHIP layout
+      // (not just the bar). Meta's turn root is full-width with the reply in a
+      // nested centered column, so whole-turn chips (result/sys) need re-centering.
+      document.documentElement.classList.add(`zs-site-${P.id}`);
 
       actionBtn.addEventListener("click", onActionClick);
       stopBtn.addEventListener("click", stopLoop);
@@ -2883,14 +2925,56 @@
 
     // Masks the input box while the extension types/sends, so the copied text
     // and the submit aren't visible to the user.
+    // Returns a FULLY OPAQUE colour that matches what is VISUALLY behind the cover.
+    // The cover must hide the typed text, so it can't be translucent - but simply
+    // returning the first solid ancestor is wrong when the composer surface itself
+    // is translucent: Meta's card is rgba(56,56,56,0.8) over a dark page, so its
+    // real on-screen colour is a BLEND (~rgb(50,50,50)), lighter than the bare page
+    // (rgb(24,24,25)). Filling the cover with the page colour made it visibly
+    // darker than the composer. So collect the background layers from `el` up to
+    // the first opaque ancestor and FLATTEN them (alpha compositing) into one solid
+    // colour that reproduces the composer's actual appearance.
     function opaqueBg(el) {
+      const layers = [];
       let n = el;
       while (n && n !== document.documentElement) {
-        const c = getComputedStyle(n).backgroundColor;
-        if (c && c !== "transparent" && !/,\s*0\s*\)$/.test(c)) return c;
+        const c = parseColor(getComputedStyle(n).backgroundColor);
+        if (c && c.a > 0) {
+          layers.push(c);
+          if (c.a >= 0.999) break; // opaque base reached - nothing behind matters
+        }
         n = n.parentElement;
       }
-      return getComputedStyle(document.body).backgroundColor || "#ffffff";
+      // Guarantee an opaque base at the bottom of the stack.
+      if (!layers.length || layers[layers.length - 1].a < 0.999) {
+        const base = parseColor(getComputedStyle(document.body).backgroundColor) ||
+                     { r: 255, g: 255, b: 255, a: 1 };
+        layers.push({ r: base.r, g: base.g, b: base.b, a: 1 });
+      }
+      // We collected top-most (el) first, so composite from the opaque base (last)
+      // upward toward el (first).
+      let out = layers[layers.length - 1];
+      for (let i = layers.length - 2; i >= 0; i--) out = blendOver(layers[i], out);
+      return `rgb(${Math.round(out.r)}, ${Math.round(out.g)}, ${Math.round(out.b)})`;
+    }
+    // Parse an rgb()/rgba() computed colour into {r,g,b,a}. Returns null for
+    // "transparent"/unparseable. getComputedStyle always yields rgb/rgba form.
+    function parseColor(c) {
+      if (!c || c === "transparent") return null;
+      const m = c.match(/rgba?\(([^)]+)\)/i);
+      if (!m) return null;
+      const p = m[1].split(",").map((x) => parseFloat(x));
+      return { r: p[0], g: p[1], b: p[2], a: p.length >= 4 ? p[3] : 1 };
+    }
+    // Source-over compositing of a (possibly translucent) fg onto an opaque bg.
+    function blendOver(fg, bg) {
+      const a = fg.a;
+      return {
+        r: fg.r * a + bg.r * (1 - a),
+        g: fg.g * a + bg.g * (1 - a),
+        b: fg.b * a + bg.b * (1 - a),
+        a: 1,
+      };
     }
 
     function inputCover(on) {
@@ -2922,6 +3006,15 @@
         // which would un-hide the raw text and un-cap its height. Cheap idempotent
         // add every frame keeps the mask + height cap glued to the live node.
         if (!e.classList.contains("zs-typing")) e.classList.add("zs-typing");
+        // The cover is SIZED to coverTarget() when a provider supplies one, else
+        // to the editor node itself. Some composers (Meta AI) make the editable a
+        // tiny line inside a much larger rounded card - covering only the editor
+        // left the rest of the card exposed and CLICKABLE (a careful click focused
+        // the editor and let the user type behind the cover). Meta returns its
+        // whole composer card so the cover blankets the entire input band and its
+        // pointer-events:auto blocks every click. The typing mask above still lives
+        // on the real editor node `e`.
+        const covNode = (P.coverTarget && P.coverTarget()) || e;
         // While a blocking modal (login / consent) or bot-check is up, hide the
         // cover so it doesn't sit on top of the modal; it reappears once the
         // overlay clears (the loop keeps running).
@@ -2934,7 +3027,7 @@
           return;
         }
         cover.style.display = "flex";
-        let r = e.getBoundingClientRect();
+        let r = covNode.getBoundingClientRect();
         // Clip the cover to the composer's VISIBLE band. Some composers grow the
         // inner editor node past a scrolling ancestor that clips it (Kimi's Vue
         // RECREATES .chat-input-editor on every inject/clear, dropping the
@@ -2943,7 +3036,7 @@
         // Measuring the raw editor then centres the cover on the giant editor's
         // midpoint - far below the visible input - so it "vanishes" off the box.
         // Intersect with the nearest clipping ancestor to track what's on screen.
-        for (let a = e.parentElement, i = 0; a && a !== document.body && i < 8; a = a.parentElement, i++) {
+        for (let a = covNode.parentElement, i = 0; a && a !== document.body && i < 8; a = a.parentElement, i++) {
           const ov = getComputedStyle(a).overflowY;
           if (ov === "auto" || ov === "scroll" || ov === "hidden") {
             const ar = a.getBoundingClientRect();
@@ -2983,7 +3076,13 @@
         cover.style.top = (centerY - h / 2) + "px";
         cover.style.width = (r.width + PAD * 2) + "px";
         cover.style.height = h + "px";
-        cover.style.background = opaqueBg(e);
+        // Composite the surface BEHIND the cover target so the fill matches what
+        // the user sees (a translucent composer card blends over the page).
+        cover.style.background = opaqueBg(covNode);
+        // When the cover blankets a whole composer card (coverTarget), match its
+        // corner radius so the cover's square corners don't poke past the card's
+        // rounded ones. Editor-sized covers keep the CSS default.
+        if (P.coverTarget) cover.style.borderRadius = getComputedStyle(covNode).borderRadius;
         coverRaf = requestAnimationFrame(place);
       };
       place();

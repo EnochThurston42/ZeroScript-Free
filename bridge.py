@@ -74,7 +74,7 @@ def _enable_ansi_colors():
 HOST = "127.0.0.1"
 # Keep in sync with zeroscript-extension/manifest.json "version" - printed at
 # startup so a user's terminal output alone tells us which build they're on.
-BRIDGE_VERSION = "1.4.2"
+BRIDGE_VERSION = "1.4.3"
 PORT = int(os.environ.get("ZS_BRIDGE_PORT", "17613"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -159,12 +159,25 @@ class _Spinner:
             self._stop.wait(0.15)
 
 
+def _clear_spinner_line():
+    """Wipe whatever a live _Spinner (running on its own thread, mid-frame) left
+    on the current console line via bare \\r writes, so the next print() below
+    doesn't get glued onto its trailing characters - seen live 2026-07-14: an
+    action_banner() fired while '[roblox] starting... -' was still mid-line and
+    the red box rendered smashed onto it instead of starting on a fresh line.
+    \\033[K (clear to end of line) doesn't depend on knowing the spinner's label
+    length the way Spinner.__exit__'s own wipe does."""
+    if sys.stdout.isatty():
+        print("\r\033[K", end="", flush=True)
+
+
 def log(msg, color="dim", terminal=True):
     """terminal=False: written to bridge_debug.log only, not the console. Use
     for noisy/technical detail (raw stderr from child MCP servers, per-call
     traces) that would bury the handful of lines a non-technical user actually
     needs to read. Nothing is ever lost - it all still lands in the file."""
     if terminal:
+        _clear_spinner_line()
         ts = time.strftime("%H:%M:%S")
         print(f"{C['dim']}{ts}{C['reset']} {C.get(color,'')}{msg}{C['reset']}", flush=True)
     if _log_file:
@@ -189,6 +202,7 @@ def action_banner(lines):
     header = "ACTION NEEDED"
     width = max([len(header) + 8] + [len(ln) for ln in lines]) + 2
     top = f">>> {header} " + ">" * max(0, width - len(header) - 5)
+    _clear_spinner_line()
     print()
     print(f"{C['act']}  {top.ljust(width)}{C['reset']}")
     for ln in lines:
@@ -481,9 +495,15 @@ def _print_reregister_hint():
     """The one user action that completes a zombie-kill recovery: Studio's MCP
     plugin registers only once per boot and that attempt went to the zombie,
     so after the kill + proxy restart the user must make it register again."""
+    # Opening the panel alone is technically enough to re-register, but we tell
+    # the user to toggle OFF/ON to be sure - a toggle strictly implies opening
+    # the panel, so it can never do less, and it removes any ambiguity about
+    # whether "just looking at it" counted. Same wording as the squatter/no-place
+    # banners so all three read as one identical instruction, not three variants.
     action_banner([
         "Go to Roblox Studio now.",
-        "Open: Assistant Settings > MCP Servers (just opening it is enough).",
+        "Turn OFF then back ON: Assistant Settings > MCP Servers",
+        "         > 'Enable Studio as MCP server'",
         "Wait about 10 seconds - this window will turn green.",
     ])
 
@@ -1708,6 +1728,56 @@ async def main():
     killed_squatter = await asyncio.to_thread(check_studio_port)
     mgr.load_config()
 
+    # Shared "we already told the user the corrective step" flag. Two producers
+    # can print the 'toggle Studio's MCP server' action banner: the early
+    # _early_studio_guidance task (fast, doesn't wait for start_all's ~48s grace
+    # loop) and the post-start_all diagnostic block in _boot_and_diagnose. This
+    # flag lets whichever fires first suppress the other, so the user never sees
+    # the same instruction twice. Mutable dict so both nested coroutines share it.
+    _guidance_shown = {"v": False}
+
+    async def _early_studio_guidance():
+        """Print the corrective action banner WITHOUT waiting for start_all()'s
+        full ~48s grace loop.
+
+        RobloxClient.start() retries tools/list for up to ~48s to catch a Studio
+        that attaches a little late - correct for a Studio that IS coming, but it
+        also means a user whose Studio is simply closed or whose MCP toggle is off
+        waits ~48s before the terminal tells them what to do (the extension, which
+        reads status over the socket, already says it immediately). So after a
+        short grace we check independently and, if still not connected, show the
+        step now. If Studio then attaches, studio_watch prints the green
+        'connected' line - so an early banner is at worst redundant, never wrong
+        (the user confirmed a premature toggle hint during boot is harmless).
+
+        Deliberately does NOT try to distinguish 'Studio closed' from 'MCP toggle
+        off': probe_studio can't tell them apart (both read app=False, see its
+        docstring), and the banner wording already covers both, so there is no
+        finer detection to preserve here. A proven port-squatter case is left to
+        _boot_and_diagnose / studio_watch, which print their own, more specific
+        hint."""
+        if PRIMARY_SERVER_ID not in mgr.clients:
+            return
+        await asyncio.sleep(12)  # give a fast, normal attach the chance to win
+        if _guidance_shown["v"]:
+            return
+        rc = mgr.clients.get(PRIMARY_SERVER_ID)
+        if rc is None or getattr(rc, "saw_foreign_ws_host", False):
+            return
+        if rc.tools_cache:
+            # Tools present - either connected, or an attach is mid-flight; defer
+            # to the authoritative probe / studio_watch rather than second-guess.
+            st = await asyncio.to_thread(probe_studio)
+            if st["app"] is not False:
+                return
+        _guidance_shown["v"] = True
+        action_banner([
+            "Open your place in Roblox Studio.",
+            "Go to: Assistant Settings > MCP Servers",
+            "       > 'Enable Studio as MCP server'",
+            "It can take up to ~10s; this window will turn green.",
+        ])
+
     async def _boot_and_diagnose():
         """Launch every configured MCP server and print the boot diagnostic
         banner. Runs as a background task AFTER the socket below is already
@@ -1746,6 +1816,11 @@ async def main():
                     log(f"roblox proxy restart after squatter kill failed: {e}", "rd")
                 _print_squatter_hint(sname)
 
+        # Set True if we kill a leftover StudioMCP zombie below and print the
+        # re-register hint - so the diagnostic block further down doesn't ALSO
+        # print its own near-identical action banner (the same de-duplication
+        # killed_squatter already does for the ropilot-squatter path).
+        reclaimed_zombie = False
         # Zombie-port deadlock check, done at boot too (not just studio_watch):
         # with Studio ALREADY open, _kill_orphan_studio_mcp was skipped by its
         # safety guard, so a leftover StudioMCP.exe may still own the port and
@@ -1759,6 +1834,7 @@ async def main():
                 total = len(mgr.list_tools())
             except Exception as e:
                 log(f"roblox proxy restart after zombie kill failed: {e}", "rd")
+            reclaimed_zombie = True
             _print_reregister_hint()
 
         # A tool count alone only proves StudioMCP (the proxy) is up - it advertises
@@ -1798,29 +1874,33 @@ async def main():
             if confirm["app"] is not True:
                 _st = confirm
         if roblox_client is not None and (roblox_total == 0 or _st["app"] is False):
-            if killed_squatter:
-                # The action_banner() right after the kill (in check_studio_port)
-                # ALREADY told the user exactly what to do. Repeating the full
-                # explanation here in a different color, seconds later, reads as
-                # a second unrelated problem to a non-technical user (seen live
+            if killed_squatter or reclaimed_zombie or _guidance_shown["v"]:
+                # The action banner was ALREADY shown - either right after a kill
+                # (check_studio_port / _print_reregister_hint for a zombie) or by
+                # the early _early_studio_guidance task. Repeating the full
+                # explanation here in a different color, seconds later, reads as a
+                # second unrelated problem to a non-technical user (seen live
                 # 2026-07-13: the toggle instruction and this block blurred
                 # together). Just confirm we're still waiting, no new instructions.
                 log("    still waiting for you to toggle Studio's MCP server "
                     "(see the action box above)...", "yl")
             else:
+                _guidance_shown["v"] = True
                 # No squatter: Studio is simply closed, or its MCP option is off.
-                log("    -------------------------------------------------------------", "yl")
-                if roblox_total == 0:
-                    log("    0 Roblox tools loaded - Roblox Studio is not exposing its tools yet.", "yl")
-                else:
+                # Match the exact steps the extension itself tells the user
+                # (Assistant Settings > MCP Servers), not a paraphrase - a
+                # differently-worded instruction here reads as a second,
+                # unrelated problem instead of the same one step.
+                if roblox_total > 0:
                     log(f"    {roblox_total} Roblox tools loaded, but NO Roblox Studio is connected yet.", "yl")
                     log("    (This can be a slow attach that clears itself within ~10-15s -", "yl")
                     log("    watch for a green 'Roblox Studio connected' line right after.)", "yl")
-                log("    Open Roblox Studio (with a place) and enable its MCP server", "yl")
-                log("    (Studio AI / MCP setting), if it is not already on.", "yl")
-                log("    It can take up to ~10s; the extension's status dot turns green", "yl")
-                log("    once Studio is attached.", "yl")
-                log("    -------------------------------------------------------------", "yl")
+                action_banner([
+                    "Open your place in Roblox Studio.",
+                    "Go to: Assistant Settings > MCP Servers",
+                    "       > 'Enable Studio as MCP server'",
+                    "It can take up to ~10s; this window will turn green.",
+                ])
         elif _st["app"] is True:
             log(f"ready {total} tools available - Roblox Studio connected", "gr")
         else:
@@ -1849,6 +1929,7 @@ async def main():
         log(f"listening on ws://{HOST}:{PORT}  - load the extension and open a supported AI chat", "cy")
         asyncio.create_task(_supervised("server_watch", server_watch))
         asyncio.create_task(_boot_and_diagnose())
+        asyncio.create_task(_early_studio_guidance())
         asyncio.create_task(_early_status_pushes())
         await asyncio.Future()  # run forever
 
