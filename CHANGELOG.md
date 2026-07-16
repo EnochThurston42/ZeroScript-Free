@@ -2,6 +2,25 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.4] - 2026-07-16
+
+### Fixed
+- **Qwen fired tool commands mid-stream ("Bad JSON" while Qwen was still
+  writing)**: Qwen's frontend update (fe 0.2.73) now emits `status:"finished"`
+  in its SSE stream ~12s before the stream actually closes. The network tap
+  treated that as the turn's end, so a still-incomplete command (e.g. an
+  unclosed `###LUA###` block) was extracted and sent, and the loop's premature
+  "unclosed" feedback was injected while the model kept writing. Fixed by no
+  longer treating `status:"finished"` as done, and by having generation
+  detection check the DOM stop button first (validated live: it now tracks the
+  real stream end closely, unlike its old ~6s lag).
+
+### Changed
+- **Removed the "⚠ unstable" badge on Qwen's Auto/Think modes**: those modes
+  were flagged as unreliable, but the real cause was the premature-`done` bug
+  above, not the thinking modes themselves. With that fixed, the badge no
+  longer applies; Qwen's own default mode is left untouched.
+
 ## [1.4.3] - 2026-07-15
 
 Adds a seventh AI provider (Meta AI) and fixes a Qwen tool-turn regression, plus

@@ -50,7 +50,14 @@
     const d = o.choices && o.choices[0] && o.choices[0].delta;
     if (d) {
       if (d.phase === "answer" && typeof d.content === "string") acc.text += d.content;
-      if (d.status === "finished") acc.done = true;
+      // Do NOT treat delta.status==="finished" as the turn's end. Qwen (fe 0.2.73)
+      // now emits `status:"finished"` ~12s BEFORE the SSE stream actually closes,
+      // and the rest of the answer (including a command's closing marker, e.g.
+      // ###END_LUA###) keeps streaming afterwards. Trusting it flipped `done` early,
+      // so the content script fired the still-incomplete command mid-stream and
+      // injected a "Bad JSON / unclosed" feedback while Qwen was still writing.
+      // The true end is the stream closing (`[DONE]`, or the reader ending in
+      // consume(), which sets acc.done there) - rely on that instead.
     }
     return acc;
   }

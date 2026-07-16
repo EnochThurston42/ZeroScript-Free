@@ -545,10 +545,18 @@ const ZSProvider = (() => {
 
   function genActive() {
     sampleStream();
+    // The DOM stop-button is the app's own generation flag. Validated live (fe
+    // 0.2.73): it stays present until the SSE stream actually closes (removed
+    // within ~250ms of streamEnd) and no longer lingers the old ~6s. Qwen now
+    // emits `status:"finished"` ~12s BEFORE the stream ends, so the net tap's
+    // `done` can flip early - NEVER report the turn done while the stop button is
+    // still up, or the loop fires the (still-incomplete) command mid-stream and
+    // injects "Bad JSON / unclosed" while Qwen is writing. Stop button = hard
+    // "still generating" gate, checked BEFORE trusting the tap's done.
+    if (stopButton()) return true;
     const g = netGenState();
     if (g === "streaming") return true;
-    if (g === "done") return false; // stream finished - ignore the lingering DOM stop button
-    if (stopButton()) return true;
+    if (g === "done") return false;
     return grewWithin(timings.GEN_IDLE_MS);
   }
   const isGenerating = genActive;
@@ -819,66 +827,21 @@ const ZSProvider = (() => {
   // build onto <html data-zs-qwen-ver>; read it from the page to confirm which
   // qwen.js is actually running (the isolated-world closure can't be read直接).
   // BUMP this whenever qwen.js changes in a way worth verifying live.
-  const QWEN_VER = "2026-07_carousel-autoresolve";
+  const QWEN_VER = "2026-07_finished-premature-done-fix";
   function setVersionBeacon() {
     try { document.documentElement.setAttribute("data-zs-qwen-ver", QWEN_VER); } catch {}
   }
 
-  // Qwen's "Auto" and "Think" thinking-modes are where the model most often fires
-  // its OWN native tool-calls (web search / code runner / function calls) instead
-  // of writing ZeroScript commands as text - it then answers in plain text or
-  // loops on "Tool X does not exist" (model-side, like Kimi; not fixable from the
-  // extension). Per the user, the warning belongs INSIDE the mode dropdown next to
-  // those two options (not floating in the composer). When the thinking-mode
-  // dropdown (`.qwen-select-thinking-dropdown`) is open we append a small amber
-  // note to each unstable option. Cosmetic only.
-  const MODE_WARN_CLASS = "zs-qwen-modewarn";
-  const UNSTABLE_MODE_RE = /^(auto|think)/i; // "Auto", "Think"/"Thinking"
-  function decorateModeDropdown() {
-    const dd = document.querySelector(".qwen-select-thinking-dropdown");
-    if (!dd) return;
-    dd.querySelectorAll(".ant-select-item-option").forEach((opt) => {
-      const label = (opt.getAttribute("title") || opt.textContent || "").trim();
-      // Existing badge anywhere in the option (we insert into the option itself,
-      // NOT into `.ant-select-item-option-content` - that content box is
-      // display:block; overflow:hidden; white-space:nowrap, so a badge placed
-      // inside it gets CLIPPED to a thin amber sliver. The option is a flex row
-      // with overflow:visible, so the badge shows fully there.)
-      const existing = opt.querySelector(":scope > ." + MODE_WARN_CLASS);
-      if (UNSTABLE_MODE_RE.test(label)) {
-        if (!existing) {
-          const b = document.createElement("span");
-          b.className = MODE_WARN_CLASS;
-          b.textContent = "⚠ unstable";
-          b.title =
-            "In this mode Qwen tends to run its OWN tools instead of the ZeroScript " +
-            'commands (plain-text answers or a "Tool X does not exist" loop). Pick a ' +
-            "non-thinking mode for steadier Roblox Studio control. Model behavior, " +
-            "not the extension.";
-          b.style.cssText =
-            "flex:none;margin-left:8px;padding:0 6px;border-radius:5px;" +
-            "font-size:9px;font-weight:700;letter-spacing:.2px;line-height:18px;" +
-            "white-space:nowrap;color:#fbbf24;background:rgba(251,191,36,0.14);" +
-            "border:1px solid rgba(251,191,36,0.4);";
-          // Sit just before the selected-state checkmark (right edge) when present.
-          const state = opt.querySelector(".ant-select-item-option-state");
-          opt.insertBefore(b, state || null);
-        }
-      } else if (existing) {
-        existing.remove();
-      }
-    });
-  }
-  let _modeObs = null;
+  // NOTE: an "⚠ unstable" badge used to be injected next to Qwen's "Auto"/"Think"
+  // thinking-modes, on the theory that those modes fired the model's OWN native
+  // tool-calls instead of ZeroScript commands. Removed 2026-07: the real cause of
+  // the flaky thinking-mode turns was the premature-`done` regression (Qwen's SSE
+  // emitting `status:"finished"` ~12s before the stream ends - see genActive and
+  // qwen-net.js), which made the loop fire the still-incomplete command mid-stream.
+  // With that fixed, Auto/Think are steady, so the warning is gone and Qwen's own
+  // default mode (Auto) is left untouched - the extension never switches it.
   function startModeWatch() {
     setVersionBeacon();
-    if (_modeObs) return;
-    // The Ant dropdown is created/destroyed on open/close and re-rendered on
-    // hover; a body observer lets us (re)decorate it each time it appears. The
-    // callback is cheap (one querySelector that no-ops when the dropdown is closed).
-    _modeObs = new MutationObserver(decorateModeDropdown);
-    try { _modeObs.observe(document.body, { childList: true, subtree: true }); } catch {}
-    decorateModeDropdown();
   }
 
   return {
