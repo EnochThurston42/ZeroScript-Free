@@ -682,12 +682,33 @@ const ZSProvider = (() => {
     const b = bodyOf(item);
     if (!b) return null;
     let hidAny = null;
+    // 1. Code wrappers (JSON viewer or <pre>) carrying a command.
     b.querySelectorAll(S.codeWrap).forEach((cw) => {
       if (cw.closest(".zs-chip")) return;
       if (CMD_SHAPE.test(cw.textContent || "")) {
         cw.classList.add("zs-tool-hide");
         b.classList.add("zs-cmd-mask");
         hidAny = hidAny || { parent: cw.parentElement, ref: cw };
+      }
+    });
+    // 2. Bare blocks with an inline command (no code wrapper). In long
+    // conversations Meta stops fencing the emitted JSON, so the raw
+    // {"command": …} renders as a plain paragraph - seen live 2026-07-16.
+    // The command may sit a level or two below the body, so walk p/div
+    // descendants and hide the TOPMOST matching block (document order puts
+    // parents first; skip anything under an already-hidden ancestor).
+    b.querySelectorAll("p, div").forEach((el) => {
+      if (el.closest(".zs-chip, .zs-tool-hide, " + S.codeWrap)) return;
+      if (el.querySelector(S.codeWrap)) return;
+      const t = (el.textContent || "").trim();
+      // A block that STARTS with the command JSON / marker is a command no
+      // matter its size (execute_luau payloads run thousands of chars); the
+      // 600-char cap only guards blocks where the shape appears mid-text.
+      const t0 = t.replace(/^json\s*/i, "");
+      const startsAsCmd = /^\{\s*"(?:command|tool)"\s*:/.test(t0) || /^###\s*(?:lua|mcp_tool)/i.test(t0);
+      if ((startsAsCmd || t.length < 600) && CMD_SHAPE.test(t) && /^[{#]/.test(t0)) {
+        el.classList.add("zs-tool-hide");
+        hidAny = hidAny || { parent: el.parentElement, ref: el };
       }
     });
     return hidAny;
