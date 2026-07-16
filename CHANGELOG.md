@@ -17,9 +17,9 @@ All notable changes to ZeroScript Free are documented here.
 
 ### Changed
 - **Removed the "⚠ unstable" badge on Qwen's Auto/Think modes**: those modes
-  were flagged as unreliable, but the real cause was the premature-`done` bug
-  above, not the thinking modes themselves. With that fixed, the badge no
-  longer applies; Qwen's own default mode is left untouched.
+  used to make Qwen claim a tool "does not exist" without even trying it. The
+  extension never force-switches Qwen's mode, so Auto (Qwen's own default) is
+  left untouched.
 
 ## [1.4.3] - 2026-07-15
 

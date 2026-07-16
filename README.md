@@ -73,6 +73,12 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.4
+
+- **Fixed Qwen firing commands mid-stream:** a Qwen frontend update made the stream report "finished" about 12 seconds before it actually closes, so a command could be sent while Qwen was still writing it, surfacing as a premature "Bad JSON" error. Generation detection now relies on the real stop button instead.
+- **Removed the "unstable" badge on Qwen's Auto/Think modes:** those modes used to make Qwen claim a tool didn't exist without trying it.
+- **Safer destructive actions:** the AI is now required to confirm the exact target before any Destroy, ClearAllChildren, or similar command, instead of clearing a whole container "to be safe."
+
 ## New in 1.4.2
 
 - **Self-healing Studio connection:** the bridge now recovers on its own from a third-party app hijacking Studio's MCP port, and from a leftover StudioMCP process that used to leave the tool count stuck at 0 no matter how many times you restarted Studio or the bridge.
