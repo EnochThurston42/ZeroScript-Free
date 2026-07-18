@@ -379,17 +379,17 @@ const ZSProvider = (() => {
   }
   const grewWithin = (ms) => _streamMax > 1 && Date.now() - _streamAt < ms;
 
-  const WEDGE_MS = 10000;
-  let _stopSince = 0;
   function genActive() {
     sampleStream();
-    const stop = !!stopButton();
-    const now = Date.now();
-    if (stop) {
-      if (!_stopSince) _stopSince = now;
-      return (now - _streamAt < WEDGE_MS) || (now - _stopSince < 2000);
-    }
-    _stopSince = 0;
+    // The stop button is Meta's authoritative "still working" signal and stays up
+    // through the ENTIRE Réflexion reasoning phase (which can run minutes, sometimes
+    // with a stray reply fragment emitted BEFORE the reasoning even starts). Trust it
+    // outright: present = generating, no timer cap. When it is gone, fall back to the
+    // stream-growth idle window. Previously genActive only trusted the button for a
+    // 10s growth window, so a long reasoning phase read as "generation ended" ~40s
+    // early, the loop abandoned the turn, lastGenAt went stale, and the eventual
+    // command landed orphaned ("not run").
+    if (stopButton()) return true;
     return grewWithin(timings.GEN_IDLE_MS);
   }
   const isGenerating = genActive;
