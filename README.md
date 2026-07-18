@@ -73,6 +73,11 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.5
+
+- **Fixed DeepSeek re-running old commands when you scroll up:** in a long conversation, scrolling back into earlier messages could make an already-executed command run again. The agent now recognizes scrolled-back history and never re-fires it.
+- **Fixed Gemini "Message could not be sent":** after a reply, Gemini's send button could stay stuck on its stop icon, so a tool result never reached the model and the agent stalled. ZeroScript now un-sticks the button and sends normally, without that reset being mistaken for you stopping the agent.
+
 ## New in 1.4.4
 
 - **Fixed Qwen firing commands mid-stream:** a Qwen frontend update made the stream report "finished" about 12 seconds before it actually closes, so a command could be sent while Qwen was still writing it, surfacing as a premature "Bad JSON" error. Generation detection now relies on the real stop button instead.
