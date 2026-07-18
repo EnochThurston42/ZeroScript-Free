@@ -240,6 +240,24 @@ const ZSProvider = (() => {
   const isBusyNow = genActive;
   const isHardGenerating = genActive;
 
+  // Reset a WEDGED stop button. Gemini's action button can stay frozen on the
+  // "stop" icon forever after a generation ENDS (the same quirk genActive guards
+  // against for detection). When it does, the send (arrow_upward) button never
+  // appears, so typeAndSend can't send and the injected tool result is stranded
+  // in the composer (seen live: send.click found:false x4 → "Message could not
+  // be sent"). Clicking the frozen stop resets the composer to its idle state and
+  // arrow_upward reappears (validated live). Guarded by genActive so a genuinely
+  // live generation is NEVER aborted. Returns true if it clicked.
+  function unwedgeStop() {
+    const stop = stopButton();
+    if (stop && !genActive()) {
+      diag("send.unwedge", {});
+      try { stop.click(); } catch {}
+      return true;
+    }
+    return false;
+  }
+
   // Gemini exposes no reliable per-turn "stopped" marker → never halted.
   const turnHalted = () => false;
   // No truncation Continue button on Gemini.
@@ -344,6 +362,10 @@ const ZSProvider = (() => {
         try { const ok = await attachImages(images); diag("attach.afterCall", { ok }); }
         catch (e) { diag("attach.threw", { msg: String((e && e.message) || e) }); }
       }
+      // A generation that just ended can leave the action button WEDGED on the
+      // stop icon (see unwedgeStop), so arrow_upward never appears and the send
+      // fails. If the stream is frozen yet a stop button shows, reset it first.
+      if (!sendButton() && unwedgeStop()) await waitFor(() => !!sendButton(), 1500);
       // Wait for Angular to render the send (arrow_upward) button - proof that
       // it registered the text. The Quill-API injection (see setEditorText)
       // fires text-change so this resolves; if it doesn't, the send won't work.

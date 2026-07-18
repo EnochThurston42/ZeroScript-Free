@@ -20,6 +20,14 @@ All notable changes to ZeroScript Free are documented here.
     even right after a reload (`resume.skipOld` in the diag ring).
   - The watchdog also skips a command turn whose injected result is rendered
     right below it (settled history), a provider-generic guard.
+- **Gemini stranded a tool result in the composer ("Message could not be
+  sent")**: after a generation ends, Gemini's action button can stay WEDGED on
+  the stop icon instead of reverting to the send arrow. The loop's generation
+  *detection* already tolerates this (WEDGE_MS), so the tool ran, but the *send*
+  waited for an `arrow_upward` button that never appeared - four retries failed
+  and the injected result sat unsent in the composer. `typeAndSend` now resets a
+  frozen stop button (clicking it, guarded by the same not-actually-generating
+  check) so the send button reappears, then sends (validated live).
 
 ## [1.4.4] - 2026-07-16
 
