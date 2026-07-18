@@ -1211,31 +1211,44 @@
   // remembered here, keyed independently of the DOM node (conversation +
   // position among assistant turns + a text prefix), and the sweep re-stamps
   // the marker whenever the node was swapped.
-  const halted = new Map(); // "conv|assistantIdx" → text prefix at halt time
+  const halted = new Map(); // "conv|turnKey" → text prefix at halt time
   const assistantIdx = (item) => P.allItems().filter(P.isAssistantItem).indexOf(item);
+  // Virtualization-stable map key for the off-DOM executed/halted memories.
+  // assistantIdx is POSITIONAL within the currently-rendered window, so on a
+  // virtualized list (DeepSeek/Qwen/GLM/Arena) scrolling up renders a different
+  // set of turns and an OLD command turn takes a low index that COLLIDES with a
+  // current turn's key - the dedupe then misses and the watchdog re-fires the
+  // scrolled-back tool. Prefer the provider's stable per-turn id when it exposes
+  // one (P.itemKey); fall back to the index for non-virtualized providers.
+  const turnKey = (item) => {
+    if (P.itemKey) {
+      const k = P.itemKey(item);
+      if (k != null) return `k${k}`;
+    }
+    return String(assistantIdx(item));
+  };
   function rememberHalted(item) {
     try {
-      const idx = assistantIdx(item);
-      if (idx < 0) return;
+      if (!item || assistantIdx(item) < 0) return;
       const pref = (P.itemText(item) || "").slice(0, 60);
       // A stop during the REASONING phase leaves the answer text EMPTY - an
       // empty/short prefix would then startsWith-match ANY later turn at this
       // index (seen live: a fresh streaming command went red "stopped" on the
       // spot). Too little text to identify → rely on the dataset marker only.
       if (pref.trim().length < 12) return;
-      halted.set(`${P.conversationKey()}|${idx}`, pref);
+      halted.set(`${P.conversationKey()}|${turnKey(item)}`, pref);
     } catch {}
   }
   function forgetHalted(item) {
     if (!item || !halted.size) return;
-    try { halted.delete(`${P.conversationKey()}|${assistantIdx(item)}`); } catch {}
+    try { halted.delete(`${P.conversationKey()}|${turnKey(item)}`); } catch {}
   }
   // The halt was recorded MID-stream, so the stored text is a PREFIX of the
   // turn's final text - match on startsWith, never equality.
   function isRememberedHalted(item, txt) {
     if (!halted.size) return false;
     try {
-      const pref = halted.get(`${P.conversationKey()}|${assistantIdx(item)}`);
+      const pref = halted.get(`${P.conversationKey()}|${turnKey(item)}`);
       return pref != null && (txt || "").startsWith(pref);
     } catch { return false; }
   }
@@ -1257,24 +1270,23 @@
   // the "already ran this" memory survives node recreation. This makes
   // re-execution IDEMPOTENT regardless of any isGenerating/lastGenAt heuristic
   // misfire - the hard part (is this a live turn?) can be wrong without harm.
-  const executed = new Map(); // "conv|assistantIdx" → text prefix at dispatch time
+  const executed = new Map(); // "conv|turnKey" → text prefix at dispatch time
   function rememberExecuted(item) {
     if (!item) return;
     try {
-      const idx = assistantIdx(item);
-      if (idx < 0) return;
+      if (assistantIdx(item) < 0) return;
       const pref = (P.itemText(item) || "").slice(0, 60);
       // Same guard as rememberHalted: too little text to identify the turn (a
       // command still streaming) would startsWith-match any later turn at this
       // index. Fall back to the dataset marker until there is enough text.
       if (pref.trim().length < 12) return;
-      executed.set(`${P.conversationKey()}|${idx}`, pref);
+      executed.set(`${P.conversationKey()}|${turnKey(item)}`, pref);
     } catch {}
   }
   function isRememberedExecuted(item, txt) {
     if (!executed.size) return false;
     try {
-      const pref = executed.get(`${P.conversationKey()}|${assistantIdx(item)}`);
+      const pref = executed.get(`${P.conversationKey()}|${turnKey(item)}`);
       return pref != null && (txt || "").startsWith(pref);
     } catch { return false; }
   }
@@ -3206,6 +3218,17 @@
     // signal): a SHORT command after a long reasoning phase shows its stop
     // square for only a frame or two - too briefly for this 200ms sampler.
     if (gen) A.lastGenAt = Date.now();
+    // High-water mark of the newest turn id seen this session (virtualization-
+    // safe). The auto-resume watchdog uses it to IGNORE a scrolled-back OLD turn:
+    // on a virtualized list lastAssistant() is the last RENDERED turn, which when
+    // scrolled up is old, and its injected-result row is off-screen/unrendered so
+    // the "result below" guard can't see it. A numeric provider id (DeepSeek's
+    // data-virtual-list-item-key) is monotonic per turn, so the max only grows at
+    // the live bottom and a scrolled-back turn reads strictly below it.
+    if (P.itemKey && P.lastAssistantId) {
+      const nk = Number(P.lastAssistantId());
+      if (Number.isFinite(nk) && (A.maxTurnId == null || nk > A.maxTurnId)) A.maxTurnId = nk;
+    }
     // Slide the regenerate grace anchor while generation is still (intermittently)
     // active, so the chip stays "run" across gen-false blips right up to the moment
     // the watchdog re-owns the tool (see regenResume).
@@ -3641,6 +3664,32 @@
     // A.bootBaselineId). Guards the "execute_luau leaked into the new chat" bug.
     if (A.bootBaselineId && P.lastAssistantId && P.lastAssistantId() === A.bootBaselineId) return;
     if (P.turnHalted(item)) return;                     // this turn was stopped → leave it
+    // Scrolled-back OLD turn guard (virtualization). lastAssistant() is the last
+    // RENDERED turn; scrolling up makes it an old command whose id is below the
+    // session's high-water mark. Its result row may be off-screen (unrendered), so
+    // the result-below guard alone can miss it - this catches it directly. Only
+    // applies when the provider exposes a numeric monotonic id (DeepSeek).
+    const curId = P.itemKey ? Number(P.itemKey(item)) : NaN;
+    if (Number.isFinite(curId) && A.maxTurnId != null && curId < A.maxTurnId) {
+      // Log once per distinct turn, not every 1s tick while the user stays up.
+      if (A._skipOldId !== curId) { A._skipOldId = curId; diag("resume.skipOld", { curId, maxTurnId: A.maxTurnId }); }
+      return;
+    }
+    // Settled-history guard (survives a page reload, unlike the executed map).
+    // A genuine resume target is a command whose tool NEVER produced a result;
+    // it has NO injected-feedback turn after it. Every ALREADY-EXECUTED command
+    // is followed by its injected result. On a virtualized list, scrolling up
+    // makes lastAssistant() an OLD command turn AND flickers isGenerating() true
+    // (sampleStream resets on the node change), refreshing lastGenAt - so the
+    // freshness guard alone doesn't stop it, and after a reload the executed map
+    // is empty. Keying off the result-below turn robustly separates the in-flight
+    // command from settled history: a scrolled-back tool with its result already
+    // present is never re-fired. (Confirmed live: same-conv reload + scroll up
+    // re-executed a historical command.)
+    const all = P.allItems();
+    const after = all[all.indexOf(item) + 1];
+    if (after && P.isUserItem(after) &&
+        ZSParse.isInjectedFeedback(P.classifyText(after, ".zs-chip"))) return;
     const txt = P.itemText(item);
     if (!ZSParse.hasToolSignature(txt)) return;
     // Node-independent dedupe: this turn's command was already dispatched (by the

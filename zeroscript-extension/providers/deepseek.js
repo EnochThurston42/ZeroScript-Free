@@ -190,8 +190,20 @@ const ZSProvider = (() => {
   // immune to that; the core prefers it over the count whenever it exists.
   function lastAssistantId() {
     const last = lastAssistant();
-    if (!last) return null;
-    const p = last.parentElement;
+    return itemKey(last);
+  }
+
+  // Stable per-turn identity for ANY item (not just the last). Same source as
+  // lastAssistantId - the parent's data-virtual-list-item-key - so the core can
+  // key its off-DOM dedupe maps (executed / halted) on an id that survives
+  // virtualization. The positional assistantIdx it falls back to is NOT stable
+  // once old turns detach: scrolling up renders a different window, so an old
+  // command turn takes a low index that collides with a current turn's key and
+  // the "already ran this" memory misses - the watchdog then re-fires the
+  // scrolled-back tool ("commands re-execute when I scroll up" report).
+  function itemKey(item) {
+    if (!item) return null;
+    const p = item.parentElement;
     const key = p && p.getAttribute("data-virtual-list-item-key");
     return key != null ? key : null;
   }
@@ -787,7 +799,7 @@ const ZSProvider = (() => {
     init({ diag: d } = {}) { if (d) diag = d; },
     // turns
     allItems, isUserItem, isAssistantItem, itemText, classifyText,
-    assistantCount, userCount, lastAssistant, lastAssistantId, readAssistant,
+    assistantCount, userCount, lastAssistant, lastAssistantId, itemKey, readAssistant,
     streamLen, snapshot,
     // composer / state
     getEditor, editorText, chatIsEmpty, isFreshChat, composerFrame, barMount,

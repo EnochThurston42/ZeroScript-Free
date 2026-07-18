@@ -2,6 +2,25 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.5] - 2026-07-18
+
+### Fixed
+- **DeepSeek re-executed old tool commands when scrolling up in a long
+  conversation**: DeepSeek virtualizes its message list, so scrolling up makes
+  an OLD command turn the last *rendered* assistant turn - its injected result
+  sits below the fold (unrendered), the in-memory "already executed" record is
+  empty after a page reload, and the node change makes generation detection
+  flicker true, refreshing the auto-resume watchdog's freshness clock. The
+  watchdog then re-fired the historical tool. Three-layer fix (validated live):
+  - The off-DOM executed/halted dedupe maps now key on a virtualization-stable
+    per-turn id (`itemKey`, DeepSeek's `data-virtual-list-item-key`) instead of
+    the positional assistant index, which collides across scroll windows.
+  - The watchdog skips any command turn whose stable id is below the session's
+    high-water mark (`A.maxTurnId`) - a scrolled-back old turn can never resume,
+    even right after a reload (`resume.skipOld` in the diag ring).
+  - The watchdog also skips a command turn whose injected result is rendered
+    right below it (settled history), a provider-generic guard.
+
 ## [1.4.4] - 2026-07-16
 
 ### Fixed
