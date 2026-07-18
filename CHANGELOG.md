@@ -27,7 +27,10 @@ All notable changes to ZeroScript Free are documented here.
   waited for an `arrow_upward` button that never appeared - four retries failed
   and the injected result sat unsent in the composer. `typeAndSend` now resets a
   frozen stop button (clicking it, guarded by the same not-actually-generating
-  check) so the send button reappears, then sends (validated live).
+  check) so the send button reappears, then sends (validated live). The native
+  stop-click hook now ignores non-trusted (programmatic) clicks, so this
+  un-wedge click is never mistaken for the user halting the agent - otherwise
+  the next legitimate command was wrongly marked "stopped".
 
 ## [1.4.4] - 2026-07-16
 

@@ -508,6 +508,12 @@ const ZSProvider = (() => {
         if (!btn) return;
         const ic = iconName(btn);
         if (ic === "stop") {
+          // Only a REAL user click is a native stop. unwedgeStop() clicks this
+          // same button programmatically to reset a frozen stop icon before a
+          // send - that synthetic click (isTrusted=false) must NOT be mistaken
+          // for the user halting the agent, or the next legit command gets
+          // marked "stopped" and the loop wrongly winds down (seen live).
+          if (!e.isTrusted) return;
           handlers.onNativeStop();
           return;
         }
