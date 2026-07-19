@@ -89,17 +89,6 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - **Removed the "unstable" badge on Qwen's Auto/Think modes:** those modes used to make Qwen claim a tool didn't exist without trying it.
 - **Safer destructive actions:** the AI is now required to confirm the exact target before any Destroy, ClearAllChildren, or similar command, instead of clearing a whole container "to be safe."
 
-## New in 1.4.2
-
-- **Self-healing Studio connection:** the bridge now recovers on its own from a third-party app hijacking Studio's MCP port, and from a leftover StudioMCP process that used to leave the tool count stuck at 0 no matter how many times you restarted Studio or the bridge.
-- **Clearer failure messages:** a missing custom-MCP command (e.g. `uvx` not installed) now names the real problem instead of looking like a silent restart loop.
-
-## New in 1.4.1
-
-- **Much more reliable Roblox Studio connection:** the bridge now recovers on its own from the connection issues Studio itself can cause - a stuck/orphaned MCP process, Studio opened after the bridge, or Studio's MCP toggle losing its registration. When it can't fix something automatically (e.g. Studio's MCP plugin needs a manual nudge), the status bar tells you exactly what to click instead of leaving you guessing or forcing a bridge restart.
-- **Faster startup with addon servers:** the bridge no longer waits on Roblox Studio before other MCP servers (like Blender) become usable - addons are ready in seconds instead of up to a minute.
-- **Sturdier bridge:** background monitoring can no longer silently stop working after an error; start.bat is hardened against more first-run edge cases (missing winget, an unextracted ZIP, stale installs).
-
 See [CHANGELOG.md](CHANGELOG.md) for older releases.
 
 ## Panel status
