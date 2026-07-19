@@ -73,6 +73,11 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.6
+
+- **Fixed the ZeroScript bar covering Kimi's popups:** Kimi's login card and the "Too many people are chatting" nag are modal popups, not standard dialogs, so the agent bar and its warning pill used to sit on top of them and could block their buttons. The bar now gets out of the way while either is open.
+- **Kimi now defaults new chats to K2.6:** Kimi's own K3 model is flagged unstable here, and most people never think to switch it. A brand new chat now starts on K2.6 automatically; picking K3 yourself on that chat is left alone.
+
 ## New in 1.4.5
 
 - **Fixed DeepSeek re-running old commands when you scroll up:** in a long conversation, scrolling back into earlier messages could make an already-executed command run again. The agent now recognizes scrolled-back history and never re-fires it.

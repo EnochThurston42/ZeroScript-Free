@@ -251,6 +251,15 @@ IMPORTANT: Your very first action is to write \`list_commands\` with no params (
       "for wait action' otherwise). Optional \"instance_path\" routes input to a focused GUI element and must start with game, LocalPlayer " +
       "or Workspace (e.g. \"LocalPlayer.PlayerGui.Menu.NameBox\"); omit it to send to whatever currently has focus. " +
       "Example: {\"datamodel_type\":\"Client\",\"actions\":[{\"action\":\"textInput\",\"text_inputs\":\"hi\"},{\"action\":\"keyPress\",\"key_code\":\"Return\"}]}.",
+    generate_mesh:
+      "Unlike generate_procedural_model, this call YIELDS: it blocks until the AI mesh generation finishes and only then " +
+      "returns the result (the finished mesh) - there is no separate poll/wait step needed, just wait for the response.",
+    generate_procedural_model:
+      "Unlike generate_mesh, this call does NOT yield: it returns immediately with a generationId while the model builds " +
+      "in the background and auto-inserts into the workspace once done - do NOT run other commands assuming the model already " +
+      "exists yet. Do NOT call wait_job_finished as a reflex right after this - but DO call it (pass the generationId) whenever " +
+      "you actually need the finished result before continuing: either the user explicitly asked to wait, or your next step " +
+      "depends on the model being done (e.g. editing/coloring it, checking its geometry).",
     user_mouse_input:
       "Simulates real player mouse actions during PLAY. Same requirement as user_keyboard_input: \"datamodel_type\":\"Client\" (auto-filled " +
       "if omitted) AND the game RUNNING (start_stop_play {\"is_start\": true} first; fails in Edit mode). " +

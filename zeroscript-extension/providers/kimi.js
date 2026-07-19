@@ -464,8 +464,74 @@ const ZSProvider = (() => {
     return "";
   }
 
-  // No other site modes to enforce (model / thinking toggle left to the user).
-  function enforceComposer() { return { ready: !!getEditor() }; }
+  // A blocking modal is open over the page. Kimi renders these as full-screen
+  // fixed masks - NOT a [role="dialog"], so the generic dialog probe used by other
+  // providers misses them. Two kinds seen:
+  //   .login-modal-mask - the login / sign-up card ("Continue with Google").
+  //   .modal-mask       - mid-session nags (e.g. the "Too many people are chatting…
+  //                       Subscribe to enter a priority queue" Tips popup on K3).
+  // While one is up, our anchored bar (a real, full-width element hugging the
+  // composer's top edge) sits ON TOP of the mask and the "⚠ unstable" pill floats
+  // over the card - both intercept clicks meant for the modal's buttons. The core
+  // hides the whole bar whenever this is true (it reappears the instant the mask
+  // clears). The masks stay in the DOM when dismissed, so check real visibility,
+  // not mere presence.
+  const MODAL_MASK_SEL = ".login-modal-mask, .modal-mask";
+  function overlayBlocking() {
+    for (const mask of document.querySelectorAll(MODAL_MASK_SEL)) {
+      if (mask.closest("#zs-root")) continue;
+      const s = getComputedStyle(mask);
+      if (s.display === "none" || s.visibility === "hidden" || parseFloat(s.opacity) === 0) continue;
+      const r = mask.getBoundingClientRect();
+      if (r.width > 40 && r.height > 40) return true;
+    }
+    return false;
+  }
+
+  // ── Default the model to K2.6 on a fresh chat ─────────────────────────────
+  // Kimi lands new chats on K3 ("flagship", but flagged unstable here and slower).
+  // Most users won't know to switch, so we pick K2.6 for them ONCE whenever we
+  // arrive on an empty chat (page load OR "New Chat"). We do NOT enforce it every
+  // sweep: if the user deliberately switches to K3 on that same empty chat, we
+  // leave it - we only re-arm when we transition INTO a new empty chat (the
+  // conversationKey flips, or an existing conversation is cleared back to empty).
+  // If K2.6 is already selected we short-circuit with no UI action (no dropdown
+  // flash) - so once Kimi remembers the choice this never fires again.
+  const modelBtn = () => document.querySelector(".current-model");
+  const currentModelIsK26 = () => {
+    const b = modelBtn();
+    return !!b && /K2\.6/.test((b.textContent || ""));
+  };
+  const visibleModelItems = () =>
+    [...document.querySelectorAll(".model-item")].filter(
+      (el) => !el.className.includes("content") && el.offsetParent !== null
+    );
+  let defaultArmed = false, lastDefaultKey = null, lastPickerOpen = 0;
+  function applyDefaultModel() {
+    // Re-arm on every transition into a fresh/empty chat (landing or New Chat).
+    const key = conversationKey();
+    if (key !== lastDefaultKey) {
+      lastDefaultKey = key;
+      if (chatIsEmpty()) defaultArmed = true;
+    }
+    if (!defaultArmed) return;
+    // Only act on an empty composer with no modal in the way; never mid-turn.
+    if (!chatIsEmpty() || !getEditor() || overlayBlocking() || isGenerating()) return;
+    if (currentModelIsK26()) { defaultArmed = false; return; } // already good, no UI
+
+    // The picker needs a click to open, then its rows render a tick later, so this
+    // spans two sweeps: open the dropdown on one, click K2.6 on the next.
+    const k26 = visibleModelItems().find((el) => /^\s*K2\.6\b/.test((el.textContent || "").trim()));
+    if (k26) { k26.click(); defaultArmed = false; return; } // selected → picker auto-closes
+    if (Date.now() - lastPickerOpen > 400) {
+      const b = modelBtn();
+      if (b) { b.click(); lastPickerOpen = Date.now(); }
+    }
+  }
+
+  // No other site modes to enforce (thinking toggle left to the user); the model
+  // default is a one-shot per fresh chat, not a per-sweep enforcement.
+  function enforceComposer() { applyDefaultModel(); return { ready: !!getEditor() }; }
   async function ensureComposerReady(reason) {
     diag("mode_ready", { reason, provider: "kimi" });
     return { ready: !!getEditor() };
@@ -710,7 +776,7 @@ const ZSProvider = (() => {
     getEditor, editorText, chatIsEmpty, isFreshChat, composerFrame, gateTarget, barAnchor,
     setInputLock, typeAndSend, stopGeneration,
     isGenerating, isBusyNow, isHardGenerating,
-    enforceComposer, ensureComposerReady, modeWarning,
+    enforceComposer, ensureComposerReady, modeWarning, overlayBlocking,
     turnHalted, findContinueBtn, clickContinueBtn,
     scanError, isTooLongMsg, isBusyMsg,
     // actions

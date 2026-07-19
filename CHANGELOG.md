@@ -2,6 +2,26 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.6] - 2026-07-19
+
+### Fixed
+- **Kimi's login and "priority queue" popups were covered by the ZeroScript
+  bar**: both render as full-screen fixed masks (`.login-modal-mask` and
+  `.modal-mask`) rather than a standard `[role="dialog"]`, so the generic
+  overlay probe used by other providers never caught them. The anchored bar
+  (a full-width fixed element hugging the composer) and the "unstable"
+  warning pill sat on top of the mask and could intercept clicks meant for
+  its buttons (e.g. "Continue with Google"). Added a Kimi-specific
+  `overlayBlocking()` that detects both mask classes by real visibility; the
+  core already hides the whole bar while it reports true, and restores it the
+  instant the mask clears.
+
+### Added
+- **Kimi now defaults fresh chats to K2.6**: Kimi lands new chats on K3,
+  which is flagged unstable here and easy to miss switching away from. A
+  brand new or emptied chat now picks K2.6 automatically, once; a deliberate
+  manual switch to K3 on that same chat is left alone.
+
 ## [1.4.5] - 2026-07-18
 
 ### Fixed
