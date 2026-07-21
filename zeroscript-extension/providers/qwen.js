@@ -331,25 +331,41 @@ const ZSProvider = (() => {
   // (~30s) on EVERY tool turn (the user-seen "tool result takes ~20-30s to inject
   // even though the arrow is back"; scrolling up re-attached old turns, bumped the
   // count past base, and temporarily fixed it). The per-turn id is immune to that.
-  function lastAssistantId() {
-    const last = lastAssistant();
-    if (!last) return null;
-    // Qwen DROPPED the turn node's own id="...assistant-<uuid>" (validated live
-    // 2026-07: assistant turns now carry NO id at all). The stable per-response
-    // identity moved to a DESCENDANT div id="chat-response-message-<uuid>", whose
-    // uuid matches the network tap's rid. Without reading it here, lastAssistantId()
-    // returned null every turn, so the core's newReply test fell back to the flat
-    // (virtualized) count and waited the full ~30s NO_TURN_GRACE on EVERY tool turn
-    // - the "tool result takes ~30s to inject even though the arrow is back" bug.
-    const rc = last.querySelector('[id^="chat-response-message-"]');
+  // Stable per-turn identity for ANY assistant item (not just the last). The
+  // core's off-DOM executed/halted maps key on turnKey(item) → P.itemKey(item)
+  // when present, else the POSITIONAL assistantIdx. Qwen VIRTUALIZES its list, so
+  // the positional index is NOT stable: two different turns (e.g. two execute_luau
+  // or two multi_edit calls) can land on the same index and, sharing a 60-char
+  // command prefix, collide in the executed map. That false "already executed"
+  // made the auto-resume watchdog SKIP a fresh command (never ran, no result
+  // injected) AND the sweep paint its chip green ✓ done - the "tool done but
+  // nothing ran, no result" bug (confirmed live 2026-07-21 via executed.collision:
+  // idx 10 shared by a 1384-char and a 775-char execute_luau turn). The per-turn
+  // uuid in the DESCENDANT div id="chat-response-message-<uuid>" is immune to
+  // virtualization, so exposing it as itemKey gives the core a collision-proof key.
+  // Returns a STRING uuid; the core's numeric maxTurnId guards use Number.isFinite
+  // so a non-numeric key is safely ignored there (same as having no itemKey).
+  function itemKey(item) {
+    if (!item) return null;
+    const rc = item.querySelector && item.querySelector('[id^="chat-response-message-"]');
     if (rc) {
       const m = rc.id.match(/chat-response-message-([0-9a-f-]{8,})/i);
       if (m) return m[1];
     }
-    // Fallbacks: the old attribute (older builds / cached turns), then the raw id.
-    const m2 = (last.id || "").match(/assistant-([0-9a-f-]{8,})/i);
-    return m2 ? m2[1] : (last.id || null);
+    const m2 = (item.id || "").match(/assistant-([0-9a-f-]{8,})/i);
+    return m2 ? m2[1] : (item.id || null);
   }
+
+  // Qwen DROPPED the turn node's own id="...assistant-<uuid>" (validated live
+  // 2026-07: assistant turns now carry NO id at all). The stable per-response
+  // identity moved to a DESCENDANT div id="chat-response-message-<uuid>", whose
+  // uuid matches the network tap's rid. Without reading it, lastAssistantId()
+  // returned null every turn, so the core's newReply test fell back to the flat
+  // (virtualized) count and waited the full ~30s NO_TURN_GRACE on EVERY tool turn
+  // - the "tool result takes ~30s to inject even though the arrow is back" bug.
+  // itemKey() (above) reads it for any item; lastAssistantId is just that for the
+  // last turn.
+  const lastAssistantId = () => itemKey(lastAssistant());
 
   const chatIsEmpty = () => allItems().length === 0;
   const isFreshChat = () =>
@@ -827,7 +843,7 @@ const ZSProvider = (() => {
   // build onto <html data-zs-qwen-ver>; read it from the page to confirm which
   // qwen.js is actually running (the isolated-world closure can't be read直接).
   // BUMP this whenever qwen.js changes in a way worth verifying live.
-  const QWEN_VER = "2026-07_finished-premature-done-fix";
+  const QWEN_VER = "2026-07_per-model-vision3";
   function setVersionBeacon() {
     try { document.documentElement.setAttribute("data-zs-qwen-ver", QWEN_VER); } catch {}
   }
@@ -844,16 +860,117 @@ const ZSProvider = (() => {
     setVersionBeacon();
   }
 
+  // ── Per-model vision capability (DYNAMIC) ──────────────────────────────────
+  // Qwen has BOTH multimodal and text-only models, switchable mid-conversation
+  // via the top-left selector, and image input only works on the multimodal ones.
+  // So supportsVision must be per-model, NOT a static flag: a text-only model that
+  // silently drops the pasted image (the user-reported "image input doesn't work
+  // on some Qwen models") is worse than conservatively withholding screen_capture.
+  // The authoritative signal is the model's OWN DESCRIPTION in the selector
+  // dropdown (validated live 2026-07): a vision model reads "...supporting text and
+  // multimodal tasks." while a text-only one reads "...Currently text-only (no
+  // vision capabilities)." The catch: the description is in the DOM only while the
+  // dropdown is OPEN - collapsed, only the model NAME (`.model-selector-text`)
+  // shows. So we scan every open dropdown, cache name→capability (persisted to
+  // localStorage so it survives reloads), seed the models already confirmed, and
+  // DEFAULT-DENY any model we have never seen a description for.
+  const MODEL_VIS_LS = "zsQwenModelVision2"; // bumped: old key may hold a stale Max-Preview=false
+  const modelVis = new Map([
+    // Seed. Some of these are USER-CONFIRMED, not derivable from the description:
+    // Qwen3.8-Max-Preview reads images (user-confirmed 2026-07) yet its selector
+    // description says NEITHER "multimodal" NOR "text-only" - so the description
+    // scan must NOT be allowed to overwrite this seed (see visionFromDesc's null
+    // = "unknown, leave the cache alone"). Plus models say "multimodal"; Qwen3.7-Max
+    // says "text-only (no vision)".
+    ["Qwen3.7-Plus", true],
+    ["Qwen3.6-Plus", true],
+    ["Qwen3.6-27B", true],              // "supports text and multimodal tasks"
+    ["Qwen3.8-Max-Preview", true],      // user-confirmed (silent description)
+    ["Qwen3.7-Max", false],             // "text-only (no vision capabilities)"
+    ["Qwen3.6-Max-Preview", false],     // "vision capabilities are not yet supported"
+  ]);
+  try {
+    const saved = JSON.parse(localStorage.getItem(MODEL_VIS_LS) || "{}");
+    for (const [k, v] of Object.entries(saved)) modelVis.set(k, !!v);
+  } catch {}
+
+  const currentModelName = () => {
+    const el = document.querySelector('[class*="model-selector-text"]');
+    return el ? (el.textContent || "").trim() : "";
+  };
+  // Tri-state capability from the model's description:
+  //   false → an EXPLICIT text-only / no-vision statement,
+  //   true  → an EXPLICIT multimodal / vision statement,
+  //   null  → the description says NEITHER (e.g. Qwen3.8-Max-Preview: "delivering
+  //           state-of-the-art performance") → UNKNOWN, so the scan must leave the
+  //           seed/cache/user-set value untouched (a silent description is NOT
+  //           proof of text-only; Max-Preview reads images despite saying nothing).
+  function visionFromDesc(desc) {
+    const d = (desc || "").toLowerCase();
+    // Negatives FIRST (they win). Note Qwen3.6-Max-Preview reads "vision
+    // capabilities are not yet supported" - the "not ... support" comes AFTER the
+    // word "vision", so a "not support (image|vision)" ordering check would MISS it
+    // and the positive "vision" branch below would wrongly flag it multimodal.
+    // Match a bare "not (yet) support(ed)" too.
+    if (/text-only|no vision|not\s+(yet\s+)?support|仅.{0,3}文本|纯文本/.test(d)) return false;
+    if (/multimodal|multi-modal|vision|视觉|多模态|图像|图片/.test(d)) return true;
+    return null;
+  }
+  let _lastCapScan = 0;
+  function scanModelCaps() {
+    if (Date.now() - _lastCapScan < 300) return;
+    _lastCapScan = Date.now();
+    let changed = false;
+    document.querySelectorAll('[class*="model-item___"]').forEach((r) => {
+      const name = r.querySelector('[class*="model-item-name"]');
+      const desc = r.querySelector('[class*="model-item-desc"]');
+      if (!name || !desc) return;
+      const nm = (name.textContent || "").trim();
+      if (!nm) return;
+      const cap = visionFromDesc(desc.textContent);
+      if (cap === null) return;            // silent description → don't touch the seed/cache
+      if (modelVis.get(nm) !== cap) { modelVis.set(nm, cap); changed = true; }
+    });
+    if (changed) {
+      try { localStorage.setItem(MODEL_VIS_LS, JSON.stringify(Object.fromEntries(modelVis))); } catch {}
+      diag("model.caps", { current: currentModelName(), known: modelVis.size });
+    }
+  }
+  function currentModelSupportsVision() {
+    const nm = currentModelName();
+    if (!nm) return false;                 // selector unreadable → conservative
+    if (modelVis.has(nm)) return !!modelVis.get(nm);
+    return false;                          // unseen model → deny until confirmed
+  }
+  let _modelCapObs = null;
+  function startModelCapWatch() {
+    scanModelCaps(); // catch a dropdown already open at init
+    if (_modelCapObs) return;
+    // Only scan when a model-item actually gets added (the dropdown opened) so a
+    // streaming chat's constant mutations don't trigger the full-document query.
+    _modelCapObs = new MutationObserver((muts) => {
+      for (const m of muts) {
+        for (const n of m.addedNodes) {
+          if (n.nodeType === 1 &&
+              (n.matches?.('[class*="model-item___"]') || n.querySelector?.('[class*="model-item___"]'))) {
+            scanModelCaps();
+            return;
+          }
+        }
+      }
+    });
+    try { _modelCapObs.observe(document.body, { subtree: true, childList: true }); } catch {}
+  }
+
   return {
     id: "qwen",
     displayName: "Qwen",
-    // Qwen3.x is multimodal and chat.qwen.ai accepts image uploads (synthetic
-    // paste → OSS upload → `.vision-item-image` preview; upload done when its src
-    // is the qwen-webui-prod OSS https url - see attachImages). So screen_capture
-    // is exposed here (main.js BLOCKED_TOOLS gate). Confirm the model actually
-    // READS the image via provider-test-checklist step 9 (incl. two captures in a
-    // row) - flip back to false if a live read ever fails.
-    supportsVision: true,
+    // DYNAMIC per selected model (see the capability section above). A getter so
+    // the core always reads the CURRENT model's capability - it can change
+    // mid-conversation. Multimodal model → true (screen_capture / image input);
+    // text-only model or an unconfirmed one → false (main.js gates screen_capture
+    // and turns any returned image into an error on !supportsVision).
+    get supportsVision() { return currentModelSupportsVision(); },
     timings,
     // Reasoning-area selector, exported so the CORE's raw-command-visible probes
     // exclude it (parity with DeepSeek/Gemini/Kimi/GLM). Qwen's thinking renders
@@ -878,10 +995,10 @@ const ZSProvider = (() => {
     chipAppend: true,
     chipTrailRef,
     reliableCounts: true,
-    init({ diag: d } = {}) { if (d) diag = d; ensureCodeObserver(); startModeWatch(); },
+    init({ diag: d } = {}) { if (d) diag = d; ensureCodeObserver(); startModeWatch(); startModelCapWatch(); },
     // turns
     allItems, isUserItem, isAssistantItem, itemText, classifyText,
-    assistantCount, userCount, lastAssistant, lastAssistantId, readAssistant,
+    assistantCount, userCount, lastAssistant, lastAssistantId, itemKey, readAssistant,
     streamLen, snapshot,
     // composer / state
     getEditor, editorText, chatIsEmpty, isFreshChat, composerFrame, gateTarget, barAnchor,

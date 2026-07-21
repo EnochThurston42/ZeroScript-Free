@@ -80,6 +80,13 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.7
+
+- **Qwen: fixed a rare "done but nothing happened" tool call:** with repeated commands a tool chip could show a green check while the command never actually ran and returned no result. The agent now tracks each Qwen turn by a stable id, so it no longer confuses two similar turns.
+- **Image support that follows the model you pick:** on Qwen, screenshots and image input are enabled only on its vision-capable models and turned off on text-only ones, updating when you switch models. On DeepSeek, choosing the Vision tab now enables screenshots and image input for it.
+- **DeepSeek: fixed image sending:** a captured screenshot used to be attached twice and never sent. It now uploads once and sends correctly.
+- **Qwen: fixed the bar covering the "Expand more models" menu.**
+
 ## New in 1.4.6
 
 - **Fixed the ZeroScript bar covering Kimi's popups:** Kimi's login card and the "Too many people are chatting" nag are modal popups, not standard dialogs, so the agent bar and its warning pill used to sit on top of them and could block their buttons. The bar now gets out of the way while either is open.
@@ -89,12 +96,6 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 
 - **Fixed DeepSeek re-running old commands when you scroll up:** in a long conversation, scrolling back into earlier messages could make an already-executed command run again. The agent now recognizes scrolled-back history and never re-fires it.
 - **Fixed Gemini "Message could not be sent":** after a reply, Gemini's send button could stay stuck on its stop icon, so a tool result never reached the model and the agent stalled. ZeroScript now un-sticks the button and sends normally, without that reset being mistaken for you stopping the agent.
-
-## New in 1.4.4
-
-- **Fixed Qwen firing commands mid-stream:** a Qwen frontend update made the stream report "finished" about 12 seconds before it actually closes, so a command could be sent while Qwen was still writing it, surfacing as a premature "Bad JSON" error. Generation detection now relies on the real stop button instead.
-- **Removed the "unstable" badge on Qwen's Auto/Think modes:** those modes used to make Qwen claim a tool didn't exist without trying it.
-- **Safer destructive actions:** the AI is now required to confirm the exact target before any Destroy, ClearAllChildren, or similar command, instead of clearing a whole container "to be safe."
 
 See [CHANGELOG.md](CHANGELOG.md) for older releases.
 

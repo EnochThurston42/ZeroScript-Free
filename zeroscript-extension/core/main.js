@@ -1290,7 +1290,6 @@
       return pref != null && (txt || "").startsWith(pref);
     } catch { return false; }
   }
-
   function stopLoop() {
     if (A.stopping) return; // already winding down - ignore double-clicks
     diag("stopLoop");

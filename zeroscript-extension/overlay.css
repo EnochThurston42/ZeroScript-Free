@@ -510,6 +510,14 @@ html.zs-site-meta .zs-hidden > .zs-chip {
 .qwen-select-dropdown,
 .mode-select-dropdown { z-index: 2147483646 !important; }
 
+/* Qwen's model list has an "Expand more models" fly-out submenu (the Qwen3.6
+   family etc.) rendered as a SEPARATE body-portalled `.ant-dropdown` at z-index
+   1050 - NOT the `.qwen-select-dropdown` above - so the ZeroScript bar drew on
+   top of it (reported live: the bar's "Start Roblox agent" row covered the
+   Qwen3.6-Max-Preview description). Scoped with :has() to the dropdown that
+   actually holds model rows, so unrelated Ant dropdowns/tooltips are untouched. */
+.ant-dropdown:has([class*="model-item"]) { z-index: 2147483646 !important; }
+
 /* Kimi (Naive UI) portals its popovers - the model picker (K2.6 Instant /
    Thinking / Agent / Swarm), the composer "+" toolkit menu (Add files &
    photos / Presets / Plugins / Skills / Web search), and that same button's

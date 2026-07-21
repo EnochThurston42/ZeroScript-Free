@@ -2,6 +2,40 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.7] - 2026-07-21
+
+### Fixed
+- **Qwen: a tool could show a green "done" check while it never ran and returned
+  no result** (seen rarely with repeated `multi_edit` / `execute_luau` calls, with
+  no Stop or regenerate involved). Qwen virtualizes its message list, so the
+  off-DOM "already executed" record was keyed on the positional turn index, and
+  two turns that shared the same 60-character command prefix could collide on the
+  same index. That false positive made the auto-resume watchdog skip the fresh
+  command (so it never ran, no result was injected) while the chip was still
+  painted a green check. The dedupe now keys on Qwen's stable per-turn id
+  (`chat-response-message-<uuid>`, exposed as `itemKey`) instead of the index, so
+  the collision cannot happen.
+- **Qwen: the ZeroScript bar covered the "Expand more models" submenu.** That
+  fly-out is a separate body-portalled `.ant-dropdown` at a low z-index, not the
+  main model dropdown, so the bar drew on top of it. Raised just that dropdown
+  above the bar (scoped so other Ant menus and tooltips are untouched).
+
+### Added
+- **Per-model image support on Qwen.** Qwen offers both multimodal and text-only
+  models, switchable mid-conversation, and image input only works on the
+  multimodal ones. `screen_capture` and image input are now enabled only on a
+  vision-capable model (Qwen3.7-Plus, Qwen3.6-Plus, Qwen3.6-27B, Qwen3.8-Max-Preview)
+  and correctly withheld on a text-only one (Qwen3.7-Max, Qwen3.6-Max-Preview),
+  read from the selected model and updated when you switch models.
+- **Image support on DeepSeek's Vision model.** DeepSeek forces its Expert model
+  for the agent, but if you choose the Vision tab that choice is now respected and
+  `screen_capture` plus image input are enabled for it. Selecting Vision is
+  detected reliably, including after switching conversations. Image attachment was
+  also fixed: it used to stage the same image multiple times and never send,
+  because the upload went through a paste that only made a local preview and never
+  uploaded the file. It now uses DeepSeek's real file upload and sends once the
+  upload completes.
+
 ## [1.4.6] - 2026-07-19
 
 ### Fixed

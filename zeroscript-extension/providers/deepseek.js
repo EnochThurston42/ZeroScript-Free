@@ -77,6 +77,7 @@ const ZSProvider = (() => {
     continueBtn: /^(continue|continuer|继续(生成)?|fortfahren|continuar|seguir|続行)$/i,
     stopped: /(arrêté|arrété|stopped|已停止|停止生成|已暂停)/i,
     expertMode: /expert|专家|专业/i,
+    visionMode: /vision|视觉|图像|多模态/i,
     deepThink: /pensée profonde|pensee profonde|profonde|réflexion|reflexion|deep ?think|深度思考|r1/i,
     searchMode: /recherche intelligente|smart search|search|web|搜索/i,
   };
@@ -273,13 +274,65 @@ const ZSProvider = (() => {
     n && (n.getAttribute("aria-pressed") === "false" ||
           n.getAttribute("aria-checked") === "false");
 
-  function findExpertRadio() {
+  // Model tabs carry data-model-type: "default" (Instant), "expert", "vision"
+  // (validated live 2026-07 on DeepSeek V4). Find one by type, falling back to a
+  // label regex if the site ever drops the attribute.
+  function findModeRadio(type, re) {
     const group = document.querySelector(S.modeRadioGroup);
     const radios = group ? [...group.querySelectorAll(S.modeRadio)] : [...document.querySelectorAll(S.modeRadio)];
-    return radios.find((r) => r.getAttribute("data-model-type") === "expert") ||
-           radios.find((r) => RE.expertMode.test(nodeText(r))) ||
+    return radios.find((r) => r.getAttribute("data-model-type") === type) ||
+           (re && radios.find((r) => re.test(nodeText(r)))) ||
            null;
   }
+  const findExpertRadio = () => findModeRadio("expert", RE.expertMode);
+  const findVisionRadio = () => findModeRadio("vision", RE.visionMode);
+  const radioOn = (r) => !!r && r.getAttribute("aria-checked") === "true";
+
+  // The user can CHOOSE the Vision tab; when they do we respect it (never force
+  // Expert over it) and enable image tools - see supportsVision (getter) and
+  // enforceComposer's expert-force guard.
+  //
+  // CRITICAL detection wrinkle (validated live 2026-07): once a conversation is
+  // active DeepSeek REMOVES the model radiogroup from the DOM entirely, so reading
+  // the radio live returns "no Vision" mid-conversation and screen_capture would be
+  // re-blocked after the first message. The model CANNOT change mid-conversation
+  // (radios are gone), so we LATCH the selection from the last time the radios were
+  // visible. And after a reload mid-conversation the radios were never seen, so we
+  // fall back to DeepSeek's per-turn model BADGE (a small element whose exact text
+  // is "Instant"/"Expert"/"Vision"). Throttled + latched so the badge scan stops
+  // once a value is known.
+  let _visLatch = false, _visLatchSet = false, _visAt = 0, _visCache = false;
+  function badgeVision() {
+    const els = [...document.querySelectorAll("div,span")].filter(
+      (e) => e.childElementCount === 0 &&
+             /^(instant|expert|vision)$/i.test((e.textContent || "").trim()) &&
+             e.getBoundingClientRect().width > 0);        // skip the 0x0 hidden dup
+    if (!els.length) return null;
+    // Prefer the persistent TOP-LEFT header badge (smallest `top`): it names the
+    // CURRENT conversation's model and survives chat switches.
+    els.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    return /vision/i.test(els[0].textContent || "");
+  }
+  function detectVision() {
+    const now = Date.now();
+    if (now - _visAt < 400) return _visCache;      // throttle the DOM work
+    _visAt = now;
+    const group = document.querySelector(S.modeRadioGroup);
+    if (group) {                                   // radios visible → authoritative
+      const v = findVisionRadio();
+      if (v) { _visLatch = radioOn(v); _visLatchSet = true; return (_visCache = _visLatch); }
+    }
+    // Active conversation (radios gone): the per-conversation header BADGE is
+    // authoritative and must WIN over the latch. The latch holds the last composer
+    // selection, which belongs to a DIFFERENT chat after a switch - so trusting it
+    // first made a Vision conv read as non-Vision on revisit (screen_capture
+    // wrongly "unavailable", 25 tools). Badge → latch → false.
+    const b = badgeVision();
+    if (b != null) { _visLatch = b; _visLatchSet = true; return (_visCache = b); }
+    if (_visLatchSet) return (_visCache = _visLatch);
+    return (_visCache = false);
+  }
+  const isVisionSelected = () => detectVision();
 
   function findToggleBy(re) {
     return [...document.querySelectorAll(S.deepThinkToggle)].find((t) => re.test(nodeText(t))) || null;
@@ -289,9 +342,12 @@ const ZSProvider = (() => {
     const expert = findExpertRadio();
     const deepThink = findToggleBy(RE.deepThink);
     const search = findToggleBy(RE.searchMode);
+    const vision = findVisionRadio();
     return {
       expertFound: !!expert,
-      expertOn: !!expert && expert.getAttribute("aria-checked") === "true",
+      expertOn: radioOn(expert),
+      visionFound: !!vision,
+      visionOn: radioOn(vision),
       deepThinkFound: !!deepThink,
       deepThinkOn: !!deepThink && isPressedOn(deepThink),
       searchFound: !!search,
@@ -310,9 +366,14 @@ const ZSProvider = (() => {
       // Pick the most powerful model for the agent: Expert (deep reasoning). In
       // the current DeepSeek V4 UI, Expert IS the thinking model; the three tabs
       // are Instant / Expert / Vision and there is no separate DeepThink toggle.
-      const expert = findExpertRadio();
-      if (expert && expert.getAttribute("aria-checked") !== "true") {
-        try { expert.click(); } catch (e) { diag("mode_fallback", { reason, target: "expert", error: String(e && e.message || e) }); }
+      // EXCEPTION: if the user deliberately chose the Vision tab, RESPECT it (don't
+      // force Expert back) - that's the only way to feed DeepSeek images, and
+      // supportsVision then flips true so screen_capture is allowed for that turn.
+      if (!isVisionSelected()) {
+        const expert = findExpertRadio();
+        if (expert && expert.getAttribute("aria-checked") !== "true") {
+          try { expert.click(); } catch (e) { diag("mode_fallback", { reason, target: "expert", error: String(e && e.message || e) }); }
+        }
       }
 
       // Legacy DeepSeek UI only: if a separate DeepThink toggle still exists, turn
@@ -343,14 +404,15 @@ const ZSProvider = (() => {
     let state = composerModeState();
     for (let i = 0; i < 12; i++) {
       state = enforceComposer(reason);
-      // Ready as soon as Expert is on and Search is off. DeepThink is only
-      // required if a legacy toggle is actually present (V4 has none).
-      if (state.expertOn && state.searchOff && (state.deepThinkOn || !state.deepThinkFound)) break;
+      // Ready as soon as the agent model is on (Expert, OR Vision if the user
+      // chose it) and Search is off. DeepThink is only required if a legacy toggle
+      // is actually present (V4 has none).
+      if ((state.expertOn || state.visionOn) && state.searchOff && (state.deepThinkOn || !state.deepThinkFound)) break;
       await sleep(120);
     }
     state = composerModeState();
     diag("mode_ready", { reason, ...state });
-    return { ...state, ready: state.expertOn };
+    return { ...state, ready: state.expertOn || state.visionOn };
   }
 
   // DeepSeek's footer button doubles as SEND (an upward arrow) and STOP (a
@@ -578,8 +640,29 @@ const ZSProvider = (() => {
     // Attach images LAST, right before the send click - see gemini.js's
     // typeAndSend for why (attaching before retyping the text can sever the
     // site's binding between the pending upload and the message being sent).
-    if (images && images.length) { try { await attachImages(images); } catch {} }
-    // Wait for React to re-enable the send button (poll up to 800ms).
+    const hasImages = !!(images && images.length);
+    if (hasImages) {
+      try { await attachImages(images); } catch {}
+      // DeepSeek REFUSES the send until the attachment finishes uploading, and its
+      // upload spinner (.ds-loading) is NOT a reliable "done" signal - it lingers on
+      // the thumbnail and isBusyNow() counts it as "busy", which is what wedged the
+      // send. So don't gate on the spinner: POLL - click the send ARROW (guarded on
+      // !isStopBtn so we never hit the stop square) and confirm the composer
+      // cleared; retry until the upload completes and DeepSeek accepts the send, or
+      // we time out. Self-correcting, with no dependency on the exact upload-done
+      // DOM node (the file-input path in attachImages does the real upload).
+      const t0 = Date.now();
+      while (Date.now() - t0 < 25000) {
+        const btn = document.querySelector(S.sendBtn);
+        if (btn && !isStopBtn(btn) && btn.getAttribute("aria-disabled") !== "true") {
+          try { btn.click(); } catch {}
+        }
+        // Editor cleared = the message left; stop square up = generation started.
+        if (await waitFor(() => editorText().trim() === "" || isHardGenerating(), 1200)) return;
+      }
+      return;
+    }
+    // Text-only: wait for React to re-enable the send button, then click.
     await waitFor(() => {
       const btn = document.querySelector(S.sendBtn);
       return btn && btn.getAttribute("aria-disabled") !== "true" && !isStopBtn(btn);
@@ -624,9 +707,23 @@ const ZSProvider = (() => {
     return new File([arr], `zeroscript_${Date.now()}_${i}.${ext}`, { type: mime });
   }
 
+  // Staged composer attachments. DeepSeek's file-list uses fully HASHED classes
+  // (validated live 2026-07-21: the old `.ds-file-list`/`[class*=thumbnail]`
+  // selectors matched NOTHING), so key off the preview IMAGE itself: a pending
+  // upload is an `<img src="blob:...">` that is NOT inside a chat message
+  // (history/sent images use CDN urls in `.ds-message` turns). This is the signal
+  // the idempotency + paste-vs-fileinput dedup depend on; with the stale selector
+  // both were inert and one capture re-attached ~20x (seen live), wedging the
+  // uploads and the send.
   const attachThumbs = () => {
-    try { return [...document.querySelectorAll(`${S.attachArea} ${S.imageThumb}`)]; }
-    catch { return []; }
+    try {
+      return [...document.querySelectorAll("img")].filter(
+        (im) => !im.closest(S.chatItem) &&
+          // blob: = pending local preview; the alt (our "zeroscript_..." filename)
+          // survives once the upload replaces the blob src with a CDN url, so the
+          // idempotency/presence checks keep matching after upload completes.
+          (/^blob:/.test(im.getAttribute("src") || "") || /^zeroscript_/.test(im.getAttribute("alt") || "")));
+    } catch { return []; }
   };
 
   // Remove any pending attachments from the composer (used to clean up a
@@ -642,20 +739,30 @@ const ZSProvider = (() => {
   async function attachImages(images) {
     const editor = getEditor();
     if (!editor || !images || !images.length) return false;
-    const before = attachThumbs().length;
-    const want = before + images.length;
+    // IDEMPOTENCY: submitAndGetBase retries typeAndSend up to 4x, reusing the same
+    // images; without this guard each retry re-attached, stacking duplicate
+    // thumbnails (the "doublot" - two identical previews - that then wedged the
+    // send). If anything is already staged, treat the attach as done.
+    if (attachThumbs().length > 0) return true;
+    const want = images.length;
     const dt = new DataTransfer();
     images.forEach((img, i) => { try { dt.items.add(fileFromImage(img, i)); } catch {} });
     if (!dt.items.length) return false;
     editor.focus();
-    // Try paste first; some builds wire uploads to a hidden <input type=file>.
-    editor.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    // Use the hidden <input type=file> as the PRIMARY path: it triggers DeepSeek's
+    // REAL upload (POST /api/v0/file/upload_file → the thumbnail's spinner clears
+    // and the send is allowed). A synthetic PASTE only creates a LOCAL blob preview
+    // and NEVER uploads (validated live: no upload_file request, `.ds-loading`
+    // spinner stuck forever, DeepSeek refuses the send) - so paste is only a
+    // last-resort fallback when no file input exists.
     const fileInput = document.querySelector('input[type="file"]');
     if (fileInput) {
       try {
         fileInput.files = dt.files;
         fileInput.dispatchEvent(new Event("change", { bubbles: true }));
       } catch {}
+    } else {
+      editor.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
     }
     // A thumbnail appearing is our success signal.
     return await waitFor(() => attachThumbs().length >= want, 15000);
@@ -786,9 +893,12 @@ const ZSProvider = (() => {
   return {
     id: "deepseek",
     displayName: "DeepSeek",
-    // DeepSeek's chat web model cannot see images - keep screen_capture
-    // blocked for it (see main.js BLOCKED_TOOLS gate).
-    supportsVision: false,
+    // DYNAMIC: DeepSeek's Instant/Expert models are text-only, but the V4 UI has a
+    // dedicated "Vision" model tab. When the user selects Vision we honour it (see
+    // enforceComposer) and this getter flips true, so main.js stops blocking
+    // screen_capture and stops turning returned images into errors. Any other tab →
+    // false. A getter so a mid-session tab switch is reflected immediately.
+    get supportsVision() { return isVisionSelected(); },
     timings,
     // Reasoning-area selector, exported so the CORE's raw-command-visible
     // probes can exclude it: DeepSeek QUOTES the command JSON/###LUA### inside
@@ -796,7 +906,13 @@ const ZSProvider = (() => {
     // this exclusion those quotes read as "raw block still visible" forever
     // (seen live: 60Hz chip rebuild spam + done→run→done chip flapping).
     thinkingSel: S.thinking,
-    init({ diag: d } = {}) { if (d) diag = d; },
+    init({ diag: d } = {}) {
+      if (d) diag = d;
+      // Version beacon: stamp the loaded build onto <html> so a reload can be
+      // confirmed from the page (read document.documentElement.dataset.zsDsVer).
+      // BUMP DS_VER on meaningful deepseek.js changes worth verifying live.
+      try { document.documentElement.setAttribute("data-zs-ds-ver", "2026-07_vision-badge-priority"); } catch {}
+    },
     // turns
     allItems, isUserItem, isAssistantItem, itemText, classifyText,
     assistantCount, userCount, lastAssistant, lastAssistantId, itemKey, readAssistant,
