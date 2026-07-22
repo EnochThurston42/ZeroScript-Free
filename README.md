@@ -1,7 +1,7 @@
 # ZeroScript - Free AI Agent for Roblox Studio
 
 ![GitHub stars](https://img.shields.io/github/stars/sebattfg/ZeroScript-Free?style=social)
-![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 
 **ZeroScript** is a free browser extension that turns DeepSeek, Gemini, Kimi, GLM, Qwen, Arena or Meta AI into a Roblox Studio AI agent.
@@ -57,7 +57,10 @@ Open Studio and load a Place, then enable MCP (first time only):
 
 ### 3. Run the Bridge
 
-Double-click `start.bat` inside the extracted folder. A small window opens, that means the Bridge is running.
+- **Windows:** double-click `start.bat` inside the extracted folder.
+- **macOS:** double-click `MacOS_Start.command` inside the extracted folder. The first time, macOS will show a security warning ("could not verify... free of malware") - this is normal for any script downloaded outside the App Store, click **Done**, then go to **System Settings > Privacy & Security**, scroll to the bottom, and click **Open Anyway**. You only need to do this once.
+
+A small window opens, that means the Bridge is running.
 
 ### 4. Start a session
 
@@ -79,6 +82,11 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Browse and insert from the Creator Store
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
+
+## New in 1.4.8
+
+- **macOS support:** a new double-clickable `MacOS_Start.command` launcher runs the Bridge on macOS, no Terminal knowledge required.
+- **DeepSeek: fixed a possible stuck send** when a tool result was too long for DeepSeek's input box - it's now trimmed to fit automatically.
 
 ## New in 1.4.7
 
@@ -105,14 +113,14 @@ See [CHANGELOG.md](CHANGELOG.md) for older releases.
 |-----|---------|
 | Green | Bridge + Studio ready (a place is open) |
 | Yellow | Bridge OK, but Studio isn't usable yet - open Roblox Studio, load a place, or enable its MCP server (hover the dot for the exact reason) |
-| Grey | Bridge offline - run start.bat |
+| Grey | Bridge offline - run start.bat (Windows) or MacOS_Start.command (macOS) |
 
 ## Requirements
 
-- Windows PC
+- Windows or macOS
 - Roblox Studio (MCP support built-in)
 - Microsoft Edge or Chrome
-- Python 3.8+ (included in start.bat setup)
+- Python 3.9+ (installed automatically on Windows, or install it yourself on macOS - see [python.org/downloads](https://www.python.org/downloads/))
 
 ## Support
 

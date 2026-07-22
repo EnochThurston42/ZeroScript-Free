@@ -2,6 +2,25 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.8] - 2026-07-22
+
+### Added
+- **macOS and Linux support for the Bridge.** A new self-contained
+  `MacOS_Start.command` launcher (double-click in Finder - no Terminal
+  knowledge needed) finds Python 3.9+, installs `websockets` if missing,
+  frees a previous Bridge still holding the port, and runs `bridge.py`,
+  mirroring what `start.bat` already does on Windows. `launch_studio_mcp.py`
+  now also locates Roblox Studio's MCP binary inside the macOS app bundle
+  (`RobloxStudio.app/Contents/MacOS/StudioMCP`), with a `ZS_STUDIO_MCP_PATH`
+  override for non-standard installs.
+- **DeepSeek: outgoing messages are now truncated to fit its input limit.**
+  DeepSeek's composer silently refuses to send past 163840 characters
+  (validated live), which could wedge the agent in the input box after a
+  large tool result (a big `http_get` / `get_page_text` / Luau dump). Long
+  results are now truncated to a safe margin below that limit, keeping both
+  the start and the end of the content, the same approach already used for
+  Qwen and Arena.
+
 ## [1.4.7] - 2026-07-21
 
 ### Fixed

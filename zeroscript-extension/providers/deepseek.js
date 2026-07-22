@@ -632,10 +632,36 @@ const ZSProvider = (() => {
     return false;
   }
 
+  // DeepSeek's composer accepts unbounded text at the DOM level (no maxlength),
+  // but a JS guard blocks the SEND past 163840 characters (= 160 KiB, validated
+  // live 2026-07-22): the send button is swallowed and a toast "Content is too
+  // long (N%)" appears (N = excess percentage, NOT a char count). A large tool
+  // result (big http_get / get_page_text / luau dump) would then silently wedge
+  // the loop in the input box. Truncate outgoing text to a prudent margin below
+  // the cap, keeping the head AND tail so neither the start nor the end of a
+  // result is lost, and mark the gap so the model knows content was dropped and
+  // does not retry the whole call. DeepSeek-only cap; other providers keep their
+  // own. Same head+tail approach as qwen.js / arena.js.
+  const SEND_CAP = 163840;   // composer send-guard limit
+  const SEND_MAX = 160000;   // prudent margin below the cap (+ room for the marker)
+  function truncateForSend(text) {
+    if (!text || text.length <= SEND_MAX) return text;
+    const omitted = text.length - SEND_MAX;
+    const marker =
+      `\n\n[…ZeroScript: result truncated to fit DeepSeek's ${SEND_CAP}-character ` +
+      `input limit - ${omitted} of ${text.length} characters omitted. Do NOT re-run ` +
+      `the command; work with the head and tail shown here…]\n\n`;
+    const budget = SEND_MAX - marker.length;
+    const headLen = Math.floor(budget * 0.85);
+    const tailLen = budget - headLen;
+    return text.slice(0, headLen) + marker + text.slice(text.length - tailLen);
+  }
+
   async function typeAndSend(text, images) {
     const editor = getEditor();
     if (!editor) throw new Error("DeepSeek input box not found");
     editor.focus();
+    text = truncateForSend(text);
     setTextareaValue(editor, text);
     // Attach images LAST, right before the send click - see gemini.js's
     // typeAndSend for why (attaching before retyping the text can sever the
