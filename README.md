@@ -129,3 +129,5 @@ ZeroScript is free. If it saves you time: [Ko-fi](https://ko-fi.com/sebattfg) - 
 ---
 
 Credit: the idea for connecting other MCP servers (Blender, Sketchfab, etc.) alongside Roblox Studio came from [javnpa](https://github.com/javnpa).
+
+Credit: macOS/Linux support contributed by [archivealf](https://github.com/archivealf).
