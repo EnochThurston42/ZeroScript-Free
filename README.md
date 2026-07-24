@@ -83,6 +83,12 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.4.9
+
+- **Popup: new Settings button** opens the Switch AI / support panel without needing an already-started conversation, and the footer no longer singles out chat.deepseek.com since seven providers are supported.
+- **Bridge: auto-recovers its own port on relaunch** instead of crashing with a cryptic error when a previous Bridge was still holding it - and gives a clear, actionable message with the exact commands to fix it when the port is held by something else.
+- **Fixed the agent parsing/executing commands while its AI tab was backgrounded or the window minimized** (observed live on GLM), which could run a tool blind or send duplicate feedback. It now pauses - with no time limit - until the AI tab is foreground again, then resumes exactly where it left off.
+
 ## New in 1.4.8
 
 - **macOS support:** a new double-clickable `MacOS_Start.command` launcher runs the Bridge on macOS, no Terminal knowledge required.
@@ -94,16 +100,6 @@ Go to https://chat.deepseek.com (recommended), https://gemini.google.com, https:
 - **Image support that follows the model you pick:** on Qwen, screenshots and image input are enabled only on its vision-capable models and turned off on text-only ones, updating when you switch models. On DeepSeek, choosing the Vision tab now enables screenshots and image input for it.
 - **DeepSeek: fixed image sending:** a captured screenshot used to be attached twice and never sent. It now uploads once and sends correctly.
 - **Qwen: fixed the bar covering the "Expand more models" menu.**
-
-## New in 1.4.6
-
-- **Fixed the ZeroScript bar covering Kimi's popups:** Kimi's login card and the "Too many people are chatting" nag are modal popups, not standard dialogs, so the agent bar and its warning pill used to sit on top of them and could block their buttons. The bar now gets out of the way while either is open.
-- **Kimi now defaults new chats to K2.6:** Kimi's own K3 model is flagged unstable here, and most people never think to switch it. A brand new chat now starts on K2.6 automatically; picking K3 yourself on that chat is left alone.
-
-## New in 1.4.5
-
-- **Fixed DeepSeek re-running old commands when you scroll up:** in a long conversation, scrolling back into earlier messages could make an already-executed command run again. The agent now recognizes scrolled-back history and never re-fires it.
-- **Fixed Gemini "Message could not be sent":** after a reply, Gemini's send button could stay stuck on its stop icon, so a tool result never reached the model and the agent stalled. ZeroScript now un-sticks the button and sends normally, without that reset being mistaken for you stopping the agent.
 
 See [CHANGELOG.md](CHANGELOG.md) for older releases.
 

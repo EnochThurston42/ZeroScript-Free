@@ -2,6 +2,34 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.4.9] - 2026-07-24
+
+### Added
+- **Popup: new Settings button.** Opens the same Switch AI / support panel
+  as the in-page bar, without needing an already-started conversation. The
+  footer text no longer singles out chat.deepseek.com - it now points to
+  "a supported AI" since seven providers are supported.
+- **Bridge: auto-recovers its own port on relaunch.** Relaunching `start.bat`
+  while a previous Bridge was still holding port 17613 (window closed with
+  the X, a crash, a double launch) used to crash with a cryptic, sometimes
+  localized `OSError [WinError 10048]`. The Bridge now detects and kills a
+  leftover Bridge process it can positively identify (by command line, never
+  by process name alone) before binding, and falls through to a clear,
+  actionable message - with the exact `netstat`/`taskkill` commands and the
+  `ZS_BRIDGE_PORT` override - if the port is held by something else.
+
+### Fixed
+- **The agent could parse/execute commands while its AI tab was backgrounded
+  or the window minimized.** Background tabs throttle rendering and timers,
+  which made DOM reads unreliable and could send duplicate feedback or run a
+  tool blind (observed live: GLM kept running `execute_luau` while minimized).
+  The agent loop, the tool-dispatch step, and the auto-resume watchdog now
+  all gate on `document.visibilityState` and park - with no time limit -
+  until the AI tab is the foreground tab again, then resume exactly where
+  they left off. Working with Roblox Studio focused while the AI tab stays
+  the active tab in its own window is unaffected; this only pauses execution
+  while that tab is truly backgrounded or its window minimized.
+
 ## [1.4.8] - 2026-07-22
 
 ### Added

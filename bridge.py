@@ -74,7 +74,7 @@ def _enable_ansi_colors():
 HOST = "127.0.0.1"
 # Keep in sync with zeroscript-extension/manifest.json "version" - printed at
 # startup so a user's terminal output alone tells us which build they're on.
-BRIDGE_VERSION = "1.4.8"
+BRIDGE_VERSION = "1.4.9"
 PORT = int(os.environ.get("ZS_BRIDGE_PORT", "17613"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -414,6 +414,76 @@ def _reclaim_studio_port(client):
         log(f"could not kill the leftover StudioMCP.exe: {e}", "rd")
         return False
     log(f"killed the leftover StudioMCP.exe (pid {pid_i}) to free Studio's MCP port.", "cy")
+    return True
+
+
+def _process_cmdline(pid):
+    """Full command line of `pid`, or "" if it can't be read. Win32 only.
+
+    Used to tell OUR OWN kind of process (a python running bridge.py) apart
+    from an unrelated app that merely happens to listen on the same port -
+    the process NAME is just "python"/"py"/"pythonw", far too generic to kill
+    on. The command line is what proves it is a leftover bridge."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+             f"-ErrorAction SilentlyContinue).CommandLine"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8,
+        ).stdout
+    except Exception:
+        return ""
+    return (out or "").strip()
+
+
+def _reclaim_bridge_port():
+    """Free OUR OWN listen port (17613) from a leftover bridge before we bind.
+
+    The common failure (reported live, WinError 10048 on bind): the user
+    relaunches start.bat while an earlier bridge.py is still running - window
+    closed with the X instead of Ctrl+C, a previous crash that left a detached
+    python, or a double double-click. The old process still holds the port, so
+    websockets.serve() dies on bind with a cryptic (localised) OSError and the
+    whole bridge exits code 1.
+
+    We reuse _port_owner (already generic over the port) and only ever kill a
+    process we can PROVE is another bridge.py - never a same-name innocent
+    (some unrelated python listening on 17613): the guard is the command line
+    containing "bridge.py", plus an explicit self-exclusion by PID. Anything
+    else (a non-python app, or a python whose cmdline we can't read) is left
+    alone and surfaced to the user by the caller's friendly bind-error path.
+    Returns True if a leftover bridge was killed."""
+    owner = _port_owner(PORT)
+    if not owner:
+        return False
+    pid, name, path = owner
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_i == os.getpid():
+        return False  # never kill ourselves (defensive; we haven't bound yet)
+    # Must look like a python interpreter AND be running bridge.py. Killing on
+    # the port alone would murder whatever legitimately owns 17613.
+    if "python" not in (name or "").lower() and "py" != (name or "").lower():
+        return False
+    cmdline = _process_cmdline(pid_i)
+    if "bridge.py" not in cmdline.lower():
+        log(f"port {PORT} is held by pid {pid_i} ('{name}') but it does not look "
+            f"like a ZeroScript bridge - leaving it alone.", "yl")
+        return False
+    log(f"port {PORT} is held by a leftover ZeroScript bridge (pid {pid_i}) from a "
+        "previous session - killing it so this one can start.", "yl")
+    try:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid_i)],
+                       capture_output=True, text=True, timeout=8)
+    except Exception as e:
+        log(f"could not kill the leftover bridge (pid {pid_i}): {e}", "rd")
+        return False
+    log(f"killed the leftover bridge (pid {pid_i}); the port is free now.", "cy")
     return True
 
 
@@ -1925,7 +1995,33 @@ async def main():
             await asyncio.sleep(interval)
             await broadcast_status()
 
-    async with websockets.serve(handler, HOST, PORT, ping_interval=20, ping_timeout=20, max_size=16 * 1024 * 1024):
+    # Free our own port from a leftover bridge (double-launch / X-closed window /
+    # prior crash) BEFORE binding, so relaunching start.bat "just works" instead
+    # of dying on WinError 10048. Only ever kills a proven bridge.py; anything
+    # else falls through to the friendly bind-error below.
+    if await asyncio.to_thread(_reclaim_bridge_port):
+        await asyncio.sleep(0.6)  # let Windows release the socket before we bind
+
+    try:
+        server_ctx = await websockets.serve(
+            handler, HOST, PORT, ping_interval=20, ping_timeout=20,
+            max_size=16 * 1024 * 1024)
+    except OSError as e:
+        # errno 10048 (Win) / EADDRINUSE: something we could NOT auto-kill still
+        # owns the port - another app, or a python whose cmdline we couldn't read.
+        if getattr(e, "errno", None) in (98, 10048) or "10048" in str(e):
+            owner = await asyncio.to_thread(_port_owner, PORT)
+            who = f" by '{owner[1]}' (pid {owner[0]})" if owner else ""
+            log(f"could not start: port {PORT} is already in use{who}.", "rd")
+            log(f"    A previous bridge may still be running, or another app took "
+                f"the port. Close it, then relaunch. To find it:", "yl")
+            log(f"      netstat -ano | findstr {PORT}", "yl")
+            log(f"      taskkill /F /PID <the pid from the last column>", "yl")
+            log(f"    Or set a different port before start.bat:  set ZS_BRIDGE_PORT=17614", "yl")
+            return
+        raise
+
+    async with server_ctx:
         log(f"listening on ws://{HOST}:{PORT}  - load the extension and open a supported AI chat", "cy")
         asyncio.create_task(_supervised("server_watch", server_watch))
         asyncio.create_task(_boot_and_diagnose())

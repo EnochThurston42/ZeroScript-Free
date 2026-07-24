@@ -182,6 +182,17 @@
     return false;
   }
 
+  // Park until the AI tab is the FOREGROUND tab of its window again (or the user
+  // halts). Deliberately has NO time cap: a tab minimized/backgrounded for an
+  // hour must resume cleanly, not silently time out into a "could not send /
+  // not run" failure. (A plain waitFor with a finite timeout returned false on a
+  // long minimize, which broke the send loop and ended the agent loop.) Returns
+  // false ONLY if the user stopped while we were parked, so callers can break.
+  async function waitVisible() {
+    while (document.hidden && !A.stop) await sleep(300);
+    return !A.stop;
+  }
+
   // Submit `text` as a new turn, masking the input while we type. Returns the
   // assistant-item count BEFORE the reply (waitForResponse waits beyond it).
   // Snapshot the identity of the assistant turn present BEFORE we send. Paired
@@ -233,7 +244,7 @@
       while (!messageSent && !landed() && tries < 4 && !A.stop) {
         if (document.hidden) {
           diag("send.waitVisible", { tries });
-          if (!(await waitFor(() => !document.hidden || A.stop, 600000)) || A.stop) break;
+          if (!(await waitVisible()) || A.stop) break; // park (no cap) until foreground; break only on user stop
         }
         await jitterBeforeSend();
         diag("submit.typeAndSend", { hasImages: !!(images && images.length) });
@@ -711,6 +722,21 @@
     const name = call.tool;
     const args = call.arguments || {};
     if (!name) return ZS.FEEDBACK.parseError("malformed");
+    // NEVER execute while the AI tab is backgrounded/minimized. This is the single
+    // choke point for ALL execution (agentLoop's tool dispatch AND the bootstrap's
+    // list_commands), so it closes the hole the loop-entry gate alone left open:
+    // the tab is foreground when a cycle starts, the model then generates for
+    // 30-120s, the user minimizes MID-generation, and waitForResponse returns a
+    // tool call that fired into Studio off-screen (observed live: GLM minimized
+    // still ran execute_luau). Parking here (no time cap) means the call runs the
+    // moment the tab is foreground again, instead of being lost or run blind.
+    if (document.hidden && !A.stop) {
+      diag("tool.waitVisible", { name });
+      // Only reachable via a user Stop while parked; agentLoop's post-runTool
+      // A.stop check breaks the loop and discards this, so it just needs to be
+      // a non-crashing, clearly-labelled string.
+      if (!(await waitVisible()) || A.stop) return "ERROR: the command was not run - stopped by the user.";
+    }
     // Blocked commands: refuse up-front with a clear, tailored error so the
     // model abandons it and continues instead of wasting/hanging a turn.
     const bareName = bareToolName(name);
@@ -996,6 +1022,25 @@
     diag("loop.start", { base });
     try {
       while (!A.stop) {
+        // Gate the WHOLE cycle on tab visibility. We only advance - read the
+        // reply, PARSE it, EXECUTE a tool, inject the result - while the AI tab
+        // is the FOREGROUND tab of its Edge window. document.visibilityState
+        // (mirrored by document.hidden) is the right signal, NOT window focus:
+        //  - Edge loses OS focus but the AI tab stays the active tab (user is
+        //    working in Roblox Studio) -> still "visible" -> the agent keeps
+        //    running, exactly as wanted.
+        //  - The AI tab is backgrounded (another tab in front) or the window is
+        //    minimized -> "hidden" -> pause here. Background tabs throttle
+        //    rendering/timers, which made DOM reads unreliable (misparse,
+        //    duplicate sends - see the send-side guard in submitAndGetBase).
+        // Parking here means we never START a parse/exec cycle off-screen; the
+        // send step re-checks too, so a switch-away mid-generation is covered.
+        if (document.hidden && !A.stop) {
+          diag("loop.waitVisible");
+          ui.inputCover(true); // keep the "Agent is working" cover up while parked
+          if (!(await waitVisible()) || A.stop) break; // park (no cap) until foreground; break only on user stop
+          diag("loop.visibleAgain");
+        }
         const res = await waitForResponse(base);
         diag("response", { kind: res.kind });
         if (A.stop || res.kind === "stopped") break;
@@ -1081,6 +1126,22 @@
           const category = learnedImg ? "screen" : ZS.toolCategory(call.tool);
           diag("tool.runCat", { name: call.tool, learnedImg, category });
 
+          // Park BEFORE painting the chip / stamping the clock / marking the turn
+          // dispatched. runTool() gates on visibility too (it is the choke point
+          // that also covers the bootstrap), but parking only there would leave
+          // this block's side effects applied for the whole minimize:
+          //   - the chip spins "running" while nothing actually runs, and
+          //     elapsedOn(zsToolT0) counts the parked time, so a 20-min minimize
+          //     renders a bogus "1200.0s" on the call;
+          //   - rememberExecuted() would mark the turn dispatched before it ever
+          //     ran, so a reload/close while parked loses the command for good -
+          //     the auto-resume watchdog refuses to re-fire an "executed" turn.
+          // Parking first keeps all of that truthful: we only commit once we are
+          // foreground and about to really dispatch.
+          if (document.hidden && !A.stop) {
+            diag("tool.parkBeforeDispatch", { name: call.tool });
+            if (!(await waitVisible()) || A.stop) break;
+          }
           // Loading chip with the real args (loop owns this item from here).
           decorate.toolBox(res.item, call.tool, "run", argSummary(call), true, callBody(call), category);
           A.toolSettle = null; // a fresh call: no settled outcome yet
@@ -1996,6 +2057,7 @@
   const ui = (() => {
     let root, bar, dot, brandEl, stateEl, actionBtn, stopBtn, switchBtn, supportBtn, discordEl, menuEl, unstableEl;
     let cover, coverRaf, barRaf;
+    let openMenuFn = null; // set by build(); lets the popup force the panel open via runtime message
     let bridgeOk = false, studioDown = false, placeDown = false, appDown = false, addonOk = false, studioProcUp = false;
     let wasConnected = false, bridgeBannerEl = null;
 
@@ -2077,6 +2139,7 @@
       };
       switchBtn.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(false); });
       supportBtn.addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(true); });
+      openMenuFn = (toSupport) => { if (menuEl.hidden) toggleMenu(toSupport); };
       document.addEventListener("click", (e) => {
         if (menuEl.hidden) return;
         if (!menuEl.contains(e.target) && !switchBtn.contains(e.target) && !supportBtn.contains(e.target))
@@ -3154,7 +3217,7 @@
     }
 
     build();
-    return { setStatus, setStarted, setStarting, showStop, markStopping, inputCover, toast, banner, showImages, nudgeStart, updateStartGate, refreshSetup, getCustomPrompt, getCustomMcpServers };
+    return { setStatus, setStarted, setStarting, showStop, markStopping, inputCover, toast, banner, showImages, nudgeStart, updateStartGate, refreshSetup, getCustomPrompt, getCustomMcpServers, openMenu: (toSupport) => openMenuFn && openMenuFn(toSupport) };
   })();
 
   // ── Live token + timer, shown ONLY on a tool call's chip detail. The
@@ -3408,6 +3471,9 @@
     if (msg && msg.type === "zs-status") {
       ui.setStatus({ connected: msg.connected, mcpAlive: msg.mcpAlive, studio: msg.studio, studioApp: msg.studioApp, studioProc: msg.studioProc, tools: msg.tools, servers: msg.servers });
     }
+    if (msg && msg.type === "zs-open-menu") {
+      ui.openMenu(false); // from the popup's Settings button — opens at the top (Switch AI / custom prompt)
+    }
   });
 
   bg({ type: "status" }).then((s) => s && ui.setStatus(s));
@@ -3653,6 +3719,7 @@
   const RESUME_FRESH_MS = 8000;
   setInterval(() => {
     if (!A.started || A.running || A.starting || A.injecting) return;
+    if (document.hidden) return;                         // AI tab not foreground → don't parse/exec off-screen (agentLoop gates too)
     if (A.userStopped) return;                          // user halted → never relaunch
     if (P.isGenerating()) return;
     if (Date.now() - A.lastGenAt > RESUME_FRESH_MS) return; // not a fresh live turn
