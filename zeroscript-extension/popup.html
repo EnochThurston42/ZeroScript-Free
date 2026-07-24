@@ -6,9 +6,9 @@
     body { width: 248px; margin: 0; font-family: "Segoe UI", sans-serif; background: #16161a; color: #e8e8ec; }
     .wrap { padding: 14px; }
     h1 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
-    .free { font-size: 9px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
-            color: #34d399; background: rgba(52,211,153,.14); border: 1px solid rgba(52,211,153,.35);
-            padding: 1px 5px; border-radius: 5px; }
+    .ver { font-size: 9.5px; font-weight: 500; letter-spacing: 0.2px;
+           color: rgba(255,255,255,0.55); background: none; border: none;
+           padding: 0; }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .dot.on { background: #34d399; box-shadow: 0 0 8px #34d399; }
     .dot.warn { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
@@ -21,7 +21,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1><span id="dot" class="dot"></span> ZeroScript <span class="free">Free</span> <span style="font-size:9px;opacity:.6">DeepSeek</span></h1>
+    <h1><span id="dot" class="dot"></span> ZeroScript <span id="ver" class="ver"></span> <span style="font-size:9px;opacity:.6">DeepSeek</span></h1>
     <div class="row" id="state">Bridge: …</div>
     <div class="row" id="tools"></div>
     <div class="row" id="servers" style="white-space:pre-line; font-family:ui-monospace,monospace; opacity:0.75"></div>

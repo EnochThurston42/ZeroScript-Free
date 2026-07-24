@@ -6,6 +6,8 @@ const SUPPORTED_HOSTS = [
 ];
 const DEFAULT_AI_URL = "https://chat.deepseek.com/";
 
+document.getElementById("ver").textContent = `v${chrome.runtime.getManifest().version}`;
+
 function render(s) {
   const dot = document.getElementById("dot");
   const state = document.getElementById("state");
