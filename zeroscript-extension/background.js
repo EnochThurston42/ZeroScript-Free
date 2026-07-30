@@ -306,7 +306,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         break;
       case "list_tools": {
         // Prefer a live refresh; fall back to cache so the loop never stalls.
-        const r = await send({ type: "list_tools" }, 25000);
+        // 10s, not 25s: a catalogue request only blocks this long when one of the
+        // MCP servers is dead (typically Roblox in a degraded, Blender-only
+        // session), and in that exact case we already hold a perfectly good cached
+        // catalogue. Waiting the full 25s just froze the boot for no new data.
+        const r = await send({ type: "list_tools" }, 10000);
         if (r.ok) sendResponse({ ok: true, tools: r.tools });
         else sendResponse({ ok: toolsCache.length > 0, tools: toolsCache, error: r.error });
         break;

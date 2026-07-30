@@ -258,6 +258,26 @@ const ZSProvider = (() => {
     return false;
   }
 
+  // Keep trying to unwedge for a bounded window, then confirm the send button
+  // came back. One single attempt was not enough, and that is what made the
+  // system prompt occasionally never leave the composer on Start:
+  // genActive() latches true for 2s from the FIRST moment it sees a stop button
+  // (`_stopSince`), so the very first unwedge attempt on a freshly-loaded page -
+  // exactly the bootstrap case - is refused by its own guard. By the time the
+  // latch expires, typeAndSend had already fallen through to the Enter fallback,
+  // which does nothing on a wedged composer. Retrying across the latch window
+  // fixes it without ever touching a genuinely live generation (genActive stays
+  // true for the whole of a real stream, so every attempt is refused then).
+  async function unwedgeStopPersistently(totalMs = 4000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < totalMs) {
+      if (sendButton()) return true;
+      if (unwedgeStop() && await waitFor(() => !!sendButton(), 1500)) return true;
+      await sleep(250);
+    }
+    return !!sendButton();
+  }
+
   // Gemini exposes no reliable per-turn "stopped" marker → never halted.
   const turnHalted = () => false;
   // No truncation Continue button on Gemini.
@@ -323,7 +343,50 @@ const ZSProvider = (() => {
   // at boot, because the prompt arrived as one mangled line. The first op runs over
   // the select-all so any stale content is replaced; empty lines skip insertText
   // (an empty insertText collapses the selection and breaks the following inserts).
-  function setEditorText(ed, text) {
+  // Gemini has no server-side composer cap worth hitting, but its EDITOR does:
+  // the insert cost below is paid per LINE, synchronously, on the page's main
+  // thread, and it degrades as the document grows. A big tool result (validated
+  // live: a 2599-line http_get) froze the whole page for ~a minute - nothing
+  // clickable, the "Agent is working…" cover stuck, then it resumed on its own
+  // once the insert finished. So the cap here is about the DOM cost, not the
+  // model's context: keep head+tail, drop the middle, and tell the model that
+  // content was dropped so it does not re-run the command.
+  const SEND_MAX_CHARS = 120000;
+  const SEND_MAX_LINES = 1200;   // the line count is what actually hurts
+  function truncateForSend(text) {
+    if (!text) return text;
+    const lines = String(text).split("\n");
+    if (text.length <= SEND_MAX_CHARS && lines.length <= SEND_MAX_LINES) return text;
+    const marker = (what) =>
+      `\n\n[…ZeroScript: result truncated (${what}) so it can be pasted into ` +
+      `Gemini's composer without freezing the page. Do NOT re-run the command; ` +
+      `work with the head and tail shown here…]\n\n`;
+    let out, note;
+    if (lines.length > SEND_MAX_LINES) {
+      const head = Math.floor(SEND_MAX_LINES * 0.85);
+      const tail = SEND_MAX_LINES - head;
+      note = `${lines.length - SEND_MAX_LINES} of ${lines.length} lines omitted`;
+      out = lines.slice(0, head).join("\n") + marker(note) + lines.slice(lines.length - tail).join("\n");
+    } else {
+      out = text;
+    }
+    if (out.length > SEND_MAX_CHARS) {
+      const budget = SEND_MAX_CHARS - 300;
+      const head = Math.floor(budget * 0.85);
+      note = `${out.length - budget} of ${out.length} characters omitted`;
+      out = out.slice(0, head) + marker(note) + out.slice(out.length - (budget - head));
+    }
+    diag("send.truncated", { from: text.length, to: out.length, lines: lines.length });
+    return out;
+  }
+
+  // Yield to the event loop between chunks. Without this the whole insert is one
+  // uninterruptible synchronous burst: the page cannot repaint or respond to a
+  // click for its entire duration (the "I can't click anything anymore" report).
+  // Yielding does not make the insert faster, it makes the page stay alive while
+  // it happens - and lets the Stop button remain usable.
+  const INSERT_CHUNK_LINES = 120;
+  async function setEditorText(ed, text) {
     ed.focus();
     const sel = window.getSelection();
     const range = document.createRange();
@@ -331,15 +394,21 @@ const ZSProvider = (() => {
     sel.removeAllRanges();
     sel.addRange(range);
     const lines = String(text).split("\n");
+    const t0 = Date.now();
     for (let i = 0; i < lines.length; i++) {
       if (lines[i]) document.execCommand("insertText", false, lines[i]);
       if (i < lines.length - 1) document.execCommand("insertLineBreak");
+      if (i && i % INSERT_CHUNK_LINES === 0) await sleep(0);
     }
+    if (lines.length > INSERT_CHUNK_LINES) diag("send.insertDone", { lines: lines.length, ms: Date.now() - t0 });
   }
 
   async function typeAndSend(text, images) {
     const ed = getEditor();
     if (!ed) throw new Error("Gemini input box not found");
+    // Cap BEFORE any comparison below, so the retry path's `editorText() !== text`
+    // test compares against what we actually typed.
+    text = truncateForSend(text);
     const relock = _locked;
     if (relock) ed.setAttribute("contenteditable", "true"); // injection needs it editable
     try {
@@ -352,7 +421,7 @@ const ZSProvider = (() => {
       // calls with 3 different files, and the model's replies stayed generic
       // - it never got one coherent image). So: only retype if the text isn't
       // already there, and only attach if nothing is pending yet.
-      if (editorText() !== text) setEditorText(ed, text);
+      if (editorText() !== text) await setEditorText(ed, text);
       const hasPendingAttachment = () => {
         const box = document.querySelector(S.inputArea);
         return !!(box && box.querySelector("[class*='preview'], [class*='thumbnail']"));
@@ -365,11 +434,21 @@ const ZSProvider = (() => {
       // A generation that just ended can leave the action button WEDGED on the
       // stop icon (see unwedgeStop), so arrow_upward never appears and the send
       // fails. If the stream is frozen yet a stop button shows, reset it first.
-      if (!sendButton() && unwedgeStop()) await waitFor(() => !!sendButton(), 1500);
+      if (!sendButton()) await unwedgeStopPersistently();
       // Wait for Angular to render the send (arrow_upward) button - proof that
       // it registered the text. The Quill-API injection (see setEditorText)
       // fires text-change so this resolves; if it doesn't, the send won't work.
       await waitFor(() => !!sendButton(), 3000);
+      // Last resort before the Enter fallback: re-type. A composer that was
+      // wedged when setEditorText ran can swallow the insert entirely, leaving
+      // an empty editor and therefore no send button - the "Start did nothing,
+      // the system prompt was never sent" report. Retyping now that the stop is
+      // cleared is safe: the editor is either empty or holds our own text.
+      if (!sendButton() && editorText() !== text) {
+        diag("send.retype", {});
+        await setEditorText(ed, text);
+        await waitFor(() => !!sendButton(), 2000);
+      }
       const btn = sendButton();
       diag("send.click", { found: !!btn, pending: hasPendingAttachment() });
       if (btn) { btn.click(); return; }

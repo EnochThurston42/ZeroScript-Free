@@ -50,14 +50,16 @@ const ZSProvider = (() => {
     editor: ".chat-input-editor",
     composer: ".chat-box",
     sendBtn: ".send-button-container",
-    // Kimi's OWN "Agent" toggle (bottom-left of the composer, next to the "+").
-    // Validated live: toggling it adds an "open" class to `.tool-switch` and
-    // flips the model-selector label from "K2.6 Instant" to "K2.6 Agent". In
-    // that mode Kimi reaches for its native agentic tools instead of emitting
-    // the ZeroScript command blocks, so a session must not be started while it
-    // is on.
-    nativeAgentToggle: ".tool-switch",
-    currentModelName: ".current-model .name",
+    // Kimi's own agentic mode. UPDATED for K3 (validated live 2026-07-30): the
+    // old `.tool-switch` toggle next to the "+" is GONE - that slot is now a
+    // `.toolkit-trigger-btn` menu - and the model dropdown no longer offers an
+    // "Agent" entry at all. The three options are now `Instantané` / `K3` /
+    // `K3 Swarm`, and K3 Swarm is the agentic one ("Recherche massive,
+    // traitement…"), so the model LABEL is the only signal left worth reading.
+    // Kept as a selector (not inlined) because the label node also moved: it is
+    // `.current-model .model-name` now, with `.name` still matching on older
+    // builds - we query both.
+    currentModelName: ".current-model .model-name, .current-model .name",
     codeWrap: ".segment-code",
     errorSurfaces: '[role="alert"],[class*="toast"],[class*="error"],[class*="alert"],[class*="notification"]',
   };
@@ -443,15 +445,14 @@ const ZSProvider = (() => {
     if (b) try { b.click(); } catch {}
   }
 
-  // Kimi's native "Agent" mode (see S.nativeAgentToggle above) makes the model
-  // favor its own built-in tools over the ZeroScript command protocol - check
-  // both the toggle's "open" class and the model-selector label as belt/braces
-  // since either can lag the other during Vue's re-render.
+  // Kimi's own agentic mode (see S.currentModelName above) makes the model favor
+  // its built-in tools over the ZeroScript command protocol. On K3 the only
+  // remaining signal is the model-selector label.
   function nativeAgentModeOn() {
-    const t = document.querySelector(S.nativeAgentToggle);
-    if (t && t.classList.contains("open")) return true;
     const m = document.querySelector(S.currentModelName);
-    return !!(m && /agent/i.test(m.textContent || ""));
+    // "K3 Swarm" (current) or "…Agent" (older builds). Both make Kimi reach for
+    // its own tooling instead of emitting ZeroScript command blocks.
+    return !!(m && /swarm|agent/i.test(m.textContent || ""));
   }
   // Visible mode guard for the ZeroScript bar (core renderBar reads this every
   // sweep, same mechanism as arena.js's modeWarning). Returns a warning string
@@ -459,8 +460,8 @@ const ZSProvider = (() => {
   // into a red warning state and disables Start until the user switches it off.
   function modeWarning() {
     if (nativeAgentModeOn())
-      return `Turn off Kimi's own <b>Agent</b> mode (next to the message box) - ` +
-        `it replaces the ZeroScript commands with Kimi's native tools and breaks the agent loop.`;
+      return `Switch the model picker off <b>K3 Swarm</b> (pick <b>K3</b> or <b>Instantané</b>) - ` +
+        `Kimi's own agentic mode replaces the ZeroScript commands with its native tools and breaks the agent loop.`;
     return "";
   }
 
@@ -488,41 +489,68 @@ const ZSProvider = (() => {
     return false;
   }
 
-  // ── Default the model to K2.6 on a fresh chat ─────────────────────────────
-  // Kimi lands new chats on K3 ("flagship", but flagged unstable here and slower).
-  // Most users won't know to switch, so we pick K2.6 for them ONCE whenever we
-  // arrive on an empty chat (page load OR "New Chat"). We do NOT enforce it every
-  // sweep: if the user deliberately switches to K3 on that same empty chat, we
-  // leave it - we only re-arm when we transition INTO a new empty chat (the
-  // conversationKey flips, or an existing conversation is cleared back to empty).
-  // If K2.6 is already selected we short-circuit with no UI action (no dropdown
-  // flash) - so once Kimi remembers the choice this never fires again.
+  // ── Default the model on a fresh chat ─────────────────────────────────────
+  // Pick a model that actually speaks the ZeroScript command protocol, ONCE,
+  // whenever we arrive on an empty chat (page load OR "New Chat"). Not enforced
+  // every sweep: if the user deliberately switches afterwards on that same empty
+  // chat, we leave it - we only re-arm on a transition INTO a new empty chat.
+  //
+  // UPDATED for K3 (validated live 2026-07-30). The old code hunted for a row
+  // matching /^K2\.6/ and that model NO LONGER EXISTS: the picker now offers
+  // `Instantané` / `K3` / `K3 Swarm`. The result was an infinite loop - the
+  // target row was never found, so nothing ever disarmed the routine and every
+  // sweep re-clicked the picker open (the "it keeps picking the mode at the
+  // bottom right of the composer" report). Two fixes, one behavioural and one
+  // structural:
+  //   1. Accept any GOOD model (K3, or K2.6 on an older build) and treat the
+  //      default landing model (Instantané) as acceptable too - it works fine
+  //      with the protocol, so there is no reason to fight the user's UI for it.
+  //      K3 Swarm is the ONLY one that must never be auto-selected (it is Kimi's
+  //      agentic mode - see nativeAgentModeOn/modeWarning).
+  //   2. A hard attempt cap, so the NEXT time Kimi renames a model this degrades
+  //      into "gave up quietly" instead of a UI loop.
   const modelBtn = () => document.querySelector(".current-model");
-  const currentModelIsK26 = () => {
-    const b = modelBtn();
-    return !!b && /K2\.6/.test((b.textContent || ""));
-  };
+  // LANGUAGE NOTE: test for the ONE model we must avoid, never for a list of
+  // models we like. Kimi's UI is localized (the picker reads "Instantané" in
+  // French, "Instant" in English, and Kimi is a Chinese product so other locales
+  // exist), so an allow-list of good names fails open in every language it does
+  // not happen to spell out - and "current model is not in my list" would send
+  // this routine hunting for a replacement row that it also cannot name. Only
+  // "Swarm" actually breaks the command protocol, so that is the only thing we
+  // match. Anything else is left strictly alone, in any language.
+  const SWARM_RE = /swarm|集群|蜂群/i;
+  const currentModelIsUsable = () => !SWARM_RE.test((modelBtn() || {}).textContent || "");
+  const MAX_PICKER_TRIES = 6;
   const visibleModelItems = () =>
     [...document.querySelectorAll(".model-item")].filter(
       (el) => !el.className.includes("content") && el.offsetParent !== null
     );
-  let defaultArmed = false, lastDefaultKey = null, lastPickerOpen = 0;
+  let defaultArmed = false, lastDefaultKey = null, lastPickerOpen = 0, pickerTries = 0;
   function applyDefaultModel() {
     // Re-arm on every transition into a fresh/empty chat (landing or New Chat).
     const key = conversationKey();
     if (key !== lastDefaultKey) {
       lastDefaultKey = key;
-      if (chatIsEmpty()) defaultArmed = true;
+      if (chatIsEmpty()) { defaultArmed = true; pickerTries = 0; }
     }
     if (!defaultArmed) return;
     // Only act on an empty composer with no modal in the way; never mid-turn.
     if (!chatIsEmpty() || !getEditor() || overlayBlocking() || isGenerating()) return;
-    if (currentModelIsK26()) { defaultArmed = false; return; } // already good, no UI
+    if (currentModelIsUsable()) { defaultArmed = false; return; } // already fine, no UI
 
-    // The picker needs a click to open, then its rows render a tick later, so this
-    // spans two sweeps: open the dropdown on one, click K2.6 on the next.
-    const k26 = visibleModelItems().find((el) => /^\s*K2\.6\b/.test((el.textContent || "").trim()));
-    if (k26) { k26.click(); defaultArmed = false; return; } // selected → picker auto-closes
+    // Only reached when the CURRENT model is Swarm. The picker needs a click to
+    // open, then its rows render a tick later, so this spans two sweeps: open the
+    // dropdown on one, click the target on the next. "Any row that is not Swarm"
+    // is language-independent, unlike naming the model we want.
+    const target = visibleModelItems().find((el) => !SWARM_RE.test(el.textContent || ""));
+    if (target) { target.click(); defaultArmed = false; return; } // picker auto-closes
+    // Nothing usable on offer (Kimi renamed things again): give up rather than
+    // re-opening the picker forever. modeWarning() still tells the user what to do.
+    if (++pickerTries > MAX_PICKER_TRIES) {
+      diag("kimi.defaultModel.giveUp", { tries: pickerTries, label: (modelBtn() || {}).textContent });
+      defaultArmed = false;
+      return;
+    }
     if (Date.now() - lastPickerOpen > 400) {
       const b = modelBtn();
       if (b) { b.click(); lastPickerOpen = Date.now(); }

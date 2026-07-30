@@ -171,6 +171,11 @@
     // return an image we can be optimistic on its NEXT call. Populated in the
     // agent loop's result branch when A.pendingImages lands.
     imageTools: new Set(),
+    // True while the loop is parked waiting for this tab to come back to the
+    // foreground (see waitVisible/parkHidden). Drives the bar's "Paused" state.
+    parked: false,
+    // Timestamp of the last successful tool-catalogue refresh (see ensureTools).
+    toolsAt: 0,
   };
 
   async function waitFor(pred, timeout) {
@@ -188,9 +193,52 @@
   // not run" failure. (A plain waitFor with a finite timeout returned false on a
   // long minimize, which broke the send loop and ended the agent loop.) Returns
   // false ONLY if the user stopped while we were parked, so callers can break.
+  // EVENT-DRIVEN, not polled. A chained setTimeout loop is subject to Chrome's
+  // "intensive throttling": once a tab has been hidden >5 min, chained timers are
+  // clamped to ONE tick per minute, so a sleep(300) poll could take up to a full
+  // minute to notice the tab came back - the user sees the bar sit on "Paused"
+  // long after they returned. visibilitychange fires immediately on unhide, so we
+  // race it against a slow stop-poll (the stop path is not latency-critical).
   async function waitVisible() {
-    while (document.hidden && !A.stop) await sleep(300);
+    if (!document.hidden || A.stop) return !A.stop;
+    A.parked = true;
+    try { ui.setStarting(); } catch {}
+    try {
+      await new Promise((resolve) => {
+        const done = () => {
+          document.removeEventListener("visibilitychange", onVis);
+          clearInterval(iv);
+          resolve();
+        };
+        const onVis = () => { if (!document.hidden) done(); };
+        document.addEventListener("visibilitychange", onVis);
+        // Safety net only: covers a stop click while parked, and the (unlikely)
+        // case of a missed visibilitychange event.
+        const iv = setInterval(() => { if (A.stop || !document.hidden) done(); }, 1000);
+      });
+    } finally {
+      A.parked = false;
+      try { ui.setStarting(); } catch {}
+    }
     return !A.stop;
+  }
+
+  // Park while the tab is hidden and report how long we were parked, so callers
+  // can slide their timers forward by that amount. Without this, every deadline
+  // inside waitForResponse (inactivity timeout, warm-up, text-stability) keeps
+  // ticking while nothing can be read - which is what turned "user switched to
+  // Studio for 5 minutes" into "No response from <site>, the loop has stopped"
+  // and left the pending command showing a grey "not run".
+  async function parkHidden() {
+    if (!document.hidden || A.stop) return 0;
+    const t0 = Date.now();
+    await waitVisible();
+    const parked = Date.now() - t0;
+    diag("park.resumed", { parkedMs: parked });
+    // Give the site a beat to repaint: a tab that was hidden has no layout, so
+    // the first reads after unhide can come back stale/blank.
+    if (!A.stop) await sleep(400);
+    return parked;
   }
 
   // Submit `text` as a new turn, masking the input while we type. Returns the
@@ -359,6 +407,32 @@
 
     while (Date.now() - lastActiveAt < TIMEOUT) {
       if (A.stop) return { kind: "stopped" };
+      // NEVER let a deadline expire while the tab is in the background. A hidden
+      // tab has no layout (innerText reads come back "", getBoundingClientRect is
+      // 0x0) and Chrome throttles its timers, so every read here is unreliable -
+      // and the site may legitimately keep streaming for as long as the user is
+      // away in Studio. Park until the tab is foreground again, then slide EVERY
+      // deadline forward by the time we were parked so nothing that was mid-flight
+      // when the user switched away expires the moment they come back. This is the
+      // fix for "I switched to Studio, came back and the command says 'not run'":
+      // the loop used to burn its 5-minute inactivity budget off-screen, end with
+      // "No response from <site>", and orphan the pending command.
+      if (document.hidden && !A.stop) {
+        const parked = await parkHidden();
+        if (A.stop) return { kind: "stopped" };
+        if (parked) {
+          lastActiveAt += parked; lastChangeAt += parked;
+          if (doneSince) doneSince += parked;
+          if (genFalseSince) genFalseSince += parked;
+          if (preStartSilent) preStartSilent += parked;
+          if (warmSince) warmSince += parked;
+          if (reasonSince) reasonSince += parked;
+          if (noTurnSince) noTurnSince += parked;
+          if (unsettledSince) unsettledSince += parked;
+          if (genOffFirstAt) genOffFirstAt += parked;
+        }
+        continue; // re-read everything now that the tab has layout again
+      }
       const gen = P.isGenerating();
       if (gen) lastActiveAt = Date.now(); // actively generating ⇒ never time out
       const d = P.readAssistant();
@@ -708,12 +782,33 @@
     });
   } catch {}
 
-  async function ensureTools() {
+  // How long a fetched catalogue stays good enough to reuse without a round trip.
+  const TOOLS_TTL_MS = 30000;
+
+  // Refresh the tool catalogue - but never pay for it twice in a row.
+  //
+  // DEGRADED MODE (Roblox Studio closed, running on an addon server like Blender)
+  // is where this used to hurt: a list_tools whose Roblox half is dead blocks the
+  // bridge until it gives up, and the extension waited the FULL background timeout
+  // for it. The boot sequence calls this three times in a row - startSession(),
+  // then the model's list_commands, then list_mcp_servers - so the user watched
+  // ~a minute of dead air with the model's reply already finished on screen
+  // ("the first commands take forever even though the model clearly stopped
+  // writing"). A short TTL collapses those three calls into one, and the caller
+  // keeps the catalogue it already has instead of stalling for a fresh one.
+  async function ensureTools(force) {
+    if (!force && A.toolList.length && Date.now() - A.toolsAt < TOOLS_TTL_MS) {
+      diag("tools.cached", { age: Date.now() - A.toolsAt, n: A.toolList.length });
+      return A.toolList;
+    }
+    const t0 = Date.now();
     const r = await bg({ type: "list_tools" });
+    diag("tools.fetched", { ms: Date.now() - t0, n: (r && r.tools && r.tools.length) || 0 });
     if (r && r.tools && r.tools.length) {
       const tools = r.tools.filter((t) => !isBlockedTool(t.name));
       A.toolList = tools;
       A.toolNames = new Set(tools.map((t) => t.name));
+      A.toolsAt = Date.now();
     }
     return A.toolList;
   }
@@ -1060,9 +1155,18 @@
             `${P.displayName} did not respond in time. The loop has stopped.`);
           break;
         }
-        // A genuinely empty turn is effectively never produced (the warm-up
-        // guard waits out slow starts) - just end the loop quietly.
-        if (res.kind === "empty") { diag("empty.end"); break; }
+        // A genuinely empty turn is effectively never produced (the warm-up guard
+        // waits out slow starts). It DOES happen when the site drops a reply, and
+        // ending the loop silently is what made this the single most confusing
+        // failure: the pending command just settles to a grey "not run" with no
+        // explanation anywhere. Say what happened.
+        if (res.kind === "empty") {
+          diag("empty.end");
+          ui.banner("warn", `${P.displayName} returned an empty reply`,
+            `The turn produced no text, so the agent loop stopped. Nothing was run. ` +
+            `Ask ${P.displayName} to continue, or press Start again in a new chat.`);
+          break;
+        }
 
         // The turn stopped with the site's "Continue" affordance.
         if (res.kind === "truncated") {
@@ -1415,7 +1519,9 @@
     P.setInputLock(true); // block user input during bootstrap
     ui.inputCover(true);  // cover the composer ("Working…") for the WHOLE Starting Up
     try {
-      await ensureTools();
+      await ensureTools(true); // boot: always take a fresh catalogue (the TTL then
+                               // covers the list_commands / list_mcp_servers calls
+                               // the model makes seconds later)
       if (!alive()) return;
       if (!A.toolList.length) {
         ui.banner("warn", "Bridge or Studio offline",
@@ -2587,6 +2693,15 @@
       } else {
         toneClass = "noagent";
         msg = `No agent here. Open a new chat to start one.`;
+      }
+      // Parked on visibility: the loop is alive but deliberately frozen because
+      // this tab is not the foreground tab of its window. Say so explicitly -
+      // otherwise the bar keeps claiming "Agent active" while nothing advances,
+      // which reads as a hang (and is what users reported as "it died in the
+      // background"). No red warn tone: this is a normal, recoverable pause.
+      if (A.parked && (A.running || A.starting)) {
+        toneClass = "warn"; warn = false;
+        msg = `<b>Paused</b> · bring this tab to the front to continue`;
       }
       // Provider mode guard: some sites (e.g. Arena) only work in one chat mode.
       // When the provider reports the current mode is unsupported, override the
