@@ -2,6 +2,41 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.5.0] - 2026-07-30
+
+### Fixed
+- **Backgrounding the AI tab no longer strands a pending command as a grey
+  "not run".** `waitForResponse` now parks entirely while the tab is hidden and
+  shifts every internal deadline (inactivity timeout, warm-up, text-stability,
+  etc.) forward by the parked duration, instead of letting them keep ticking
+  off-screen. `waitVisible` switched from polling to listening for
+  `visibilitychange` - Chrome clamps chained background timers to one tick per
+  minute after 5 minutes hidden, which used to delay the resume by up to a
+  minute. The bar now shows a **Paused** state while parked, and a genuinely
+  empty reply from the site now shows a banner instead of ending the loop
+  silently.
+- **Gemini: fixed the page freezing (nothing clickable) on a large tool
+  result.** Gemini's composer inserts text line by line, synchronously, on the
+  main thread - a 2599-line `http_get` result froze the page for about a
+  minute. Outgoing text is now capped (120k chars / 1200 lines, head and tail
+  kept) and the insert yields to the browser every 120 lines.
+- **Gemini: fixed the system prompt occasionally never leaving the composer on
+  Start.** The wedged-stop-button detector latches for 2 seconds from the
+  first time it sees a stop button, so the single recovery attempt at boot -
+  the very first sighting - was refused by its own guard. It now retries
+  across that window and retypes as a last resort.
+- **Kimi: fixed the model picker opening and closing in a loop.** Kimi's K3
+  update removed the model (K2.6) the default-model routine used to select,
+  so it kept hunting for a row that no longer exists. It now only acts when
+  the current model is **K3 Swarm** (matched by name, any UI language) and
+  gives up after a few tries instead of looping. The native-agent warning
+  guard was equally broken by the same update and now reads the model label
+  at its new location.
+- **Degraded mode (Roblox Studio closed, running on an addon server only)
+  starts much faster.** The tool catalogue request blocks until timeout when
+  Roblox is down, and the boot sequence called it three times in a row. Added
+  a 30s cache on the catalogue and cut the request timeout from 25s to 10s.
+
 ## [1.4.9] - 2026-07-24
 
 ### Added
