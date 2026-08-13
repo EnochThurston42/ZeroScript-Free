@@ -858,6 +858,9 @@ const ZSProvider = (() => {
     id: "chatgpt",
     displayName: "ChatGPT",
     timings,
+    // Exported for test-chatgpt.js (the Node smoke test drives it against a stub
+    // DOM). The core reads replies through itemText/classifyText, not this.
+    textWithout,
     // Vision OFF, like DeepSeek's text-only Expert tab. ChatGPT's free tier caps
     // image/file input separately from messages ("les fichiers, les images et
     // l'analyse sont indisponibles jusqu'à la réinitialisation de votre quota"),

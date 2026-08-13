@@ -61,7 +61,14 @@ background.js         WebSocket to the local bridge (provider-agnostic)
 `manifest.json` (`content_scripts` + `host_permissions`) and to
 `PROVIDER_URLS` in `background.js`. No core change required.
 
-Run `node test-parser.js` to smoke-test the command parser.
+Smoke tests (plain Node, no dependencies - run them from this directory):
+
+- `node test-parser.js` - the command parser (`core/parser.js`).
+- `node test-chatgpt.js` - ChatGPT reply reading (`providers/chatgpt.js`),
+  driven against a stub DOM: CodeMirror line joining, the `data-zs-cm`
+  MAIN-world tap that long code blocks depend on, and subtree exclusion.
+
+Both print `PASS`/`FAIL` per case and exit non-zero on failure.
 
 ## Support
 
