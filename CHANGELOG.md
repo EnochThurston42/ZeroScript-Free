@@ -2,6 +2,57 @@
 
 All notable changes to ZeroScript Free are documented here.
 
+## [1.5.1] - 2026-08-13
+
+### Added
+- **ChatGPT support (chatgpt.com).** ZeroScript now runs on ChatGPT as an
+  eighth provider. Image input is deliberately disabled there: ChatGPT's free
+  tier caps files/images on a separate quota from messages, so vision would
+  work only part of the day. Reasoning mode ("Analyser") and the model picker
+  are left entirely to you.
+
+### Fixed
+- **ChatGPT: fixed most tool calls failing outright.** ChatGPT renders code
+  blocks with CodeMirror, which puts one element per line and **no newline
+  characters at all** in the page. Reading a reply the usual way therefore
+  returned the whole script glued onto a single line, so a perfectly valid
+  command came back as "Failed to parse command code / your code block was
+  empty", and the calls that did run reported every Luau error on line 1.
+  Replies are now read with the line structure preserved.
+- **ChatGPT: fixed long commands being executed truncated.** Beyond roughly
+  2000-4000 characters, CodeMirror only renders *part* of a long line and the
+  rendered text then stays frozen while the model keeps writing - the tool
+  chip's token counter would climb, drop back to about 500 tokens, freeze
+  there, and the command would run cut off. Measured live: a 21273-character
+  command of which the page exposed 4049. ZeroScript now reads the editor's
+  real document instead of the rendered page, through a new MAIN-world tap
+  (`providers/chatgpt-cm.js`), the same approach already used for Qwen's
+  Monaco editor. A 5.3k-token `multi_edit` now applies whole.
+- **ChatGPT: fixed the raw command staying visible.** When the model writes a
+  command without wrapping it in a code fence, ChatGPT splits it into dozens of
+  sibling paragraphs (68 of them for a 208-line script) and only the first one
+  carried the marker, so the rest of the script stayed on screen. The whole
+  marker-to-marker range is now hidden, including while it streams.
+- **Fixed the agent dying silently when the model called a tool the
+  function-calling way.** A reply like
+  `{"toolName": "get_studio_state", "studio_id": "…"}` names a real tool but
+  uses the wrong key, so nothing recognised it as a command: the turn was
+  finalised as a plain-text answer and the loop simply ended, leaving the agent
+  looking frozen (seen on ChatGPT in a long session). ZeroScript now spots a
+  known tool named under `toolName` / `tool` / `name` / `function` / `action`
+  and asks the model to rewrite it with the proper envelope, exactly as it
+  already did for a missing `###LUA###` opener or bare parameters. Prose that
+  merely mentions a tool name is not affected - the check requires a tool that
+  is really in the catalogue.
+- **Fixed the "Agent is working…" cover hanging past the composer on the first
+  send.** Injecting the system prompt grows the composer, the page gains a
+  scrollbar and the content column narrows, so the composer slides sideways -
+  and a site that animates that move updates its layout after the cover has
+  already been placed, leaving it a frame behind (28px past the card's right
+  edge on ChatGPT). The cover is now clamped to the composer card, so a stale
+  measurement can never be seen. Only the first send was affected, because the
+  composer stops moving once it is docked at the bottom.
+
 ## [1.5.0] - 2026-07-30
 
 ### Fixed

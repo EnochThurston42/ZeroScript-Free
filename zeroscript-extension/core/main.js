@@ -103,6 +103,7 @@
   // content_scripts and background.js PROVIDER_URLS when adding a provider.
   const AI_SITES = [
     { name: "DeepSeek", url: "https://chat.deepseek.com/" },
+    { name: "ChatGPT", url: "https://chatgpt.com/" },
     { name: "Gemini", url: "https://gemini.google.com/app" },
     { name: "Kimi", url: "https://www.kimi.com/" },
     { name: "GLM", url: "https://chat.z.ai/" },
@@ -704,6 +705,26 @@
           !/"command"\s*:/.test(r)) {
         return { kind: "parse_error", reason: "envelope", raw: r, item: d.item };
       }
+      // Malformed command, function-calling flavour: the model named a REAL tool
+      // but under the WRONG KEY - {"toolName": "get_studio_state", "studio_id": …}
+      // instead of {"command": …, "params": {…}}. It reads as a deliberate call,
+      // yet hasToolSignature never fires (no "command" key, no markers) and the
+      // argument keys are the tool's own, so neither guard above catches it: the
+      // turn finalized as a plain-text answer and the loop ENDED with the user
+      // watching a dead agent (seen live on ChatGPT, long session, 2026-08).
+      // GATED on the value being a tool we actually have - same reasoning as the
+      // toolNameFromText gate above, so prose that merely mentions a tool name in
+      // some JSON example is never looped on.
+      const wrongKey = /"(?:toolName|tool_name|tool|name|function|action)"\s*:\s*"([A-Za-z0-9_.\/-]+)"/.exec(r);
+      if (wrongKey && !/"command"\s*:/.test(r)) {
+        const wk = wrongKey[1];
+        const hit = knownTool(wk);
+        // Log the miss too: the gate depends on how the bridge ADVERTISES names
+        // (they can be prefixed per server on a collision), so a silent no-match
+        // is exactly the case that is impossible to diagnose after the fact.
+        diag("cmd.wrongKey", { name: wk, known: hit, catalogue: A.toolNames.size });
+        if (hit) return { kind: "parse_error", reason: "toolKey", raw: r, item: d.item };
+      }
       // NOTE: a site "server busy / something went wrong" notice is deliberately
       // NOT special-cased. It falls through to kind:"text" below and simply ENDS
       // the loop as a final answer - no auto-retry. Retrying risked an infinite
@@ -751,6 +772,19 @@
   const ALWAYS_BLOCKED_TOOLS = new Set(["subagent"]);
   const VISION_TOOLS = new Set(["screen_capture"]);
   const bareToolName = (name) => (name && name.includes("/") ? name.split("/").pop() : name) || "";
+  // Is `name` a tool we actually have? The bridge ADVERTISES names that may carry
+  // a per-server prefix when two MCP servers expose the same tool (see
+  // list_tools in bridge.py), while the model always writes the bare name - so a
+  // plain `A.toolNames.has(bare)` misses, and so does bareToolName(bare), which
+  // cannot re-add a prefix it never had. Compare bare-to-bare in BOTH directions.
+  const bareKey = (n) => String(n || "").split("/").pop().split(".").pop();
+  function knownTool(name) {
+    if (!name || !A.toolNames.size) return false;
+    if (A.toolNames.has(name) || A.toolNames.has(bareToolName(name))) return true;
+    const b = bareKey(name);
+    for (const t of A.toolNames) if (bareKey(t) === b) return true;
+    return false;
+  }
   const isBlockedTool = (name) => {
     const bare = bareToolName(name);
     if (ALWAYS_BLOCKED_TOOLS.has(bare)) return true;
@@ -1070,11 +1104,41 @@
   // True failure = OUR wrapper prefix OR an MCP tool's in-body error lead-in.
   const feedbackIsError = (feedback) => feedback.startsWith("ERROR") || bodyLooksFailed(feedback);
 
+  // Some tools answer with raw JSON on one line, and a 44-char slice of it makes
+  // a chip that says nothing: list_roblox_studios read
+  // `{"studios":[{"id":"8521cfad-f8d9-46f4-8cbe-2`. Summarise the SHAPE instead,
+  // in the same spirit as the boot chip's "25 commands". Returns null when the
+  // body isn't JSON, so plain-text outputs keep their first line unchanged.
+  function jsonSummary(body) {
+    if (!/^[[{]/.test(body) || body.length > 200000) return null;
+    let v;
+    try { v = JSON.parse(body); } catch { return null; }
+    if (Array.isArray(v)) return `${v.length} item${v.length === 1 ? "" : "s"}`;
+    if (!v || typeof v !== "object") return null;
+    const keys = Object.keys(v);
+    // The common MCP shape: one wrapper key holding the list. Its name is already
+    // plural ("studios", "scripts"), so it reads correctly as-is - just drop the
+    // trailing "s" when there is exactly one, so it says "1 studio".
+    if (keys.length === 1 && Array.isArray(v[keys[0]])) {
+      const n = v[keys[0]].length;
+      const word = n === 1 ? keys[0].replace(/s$/, "") : keys[0];
+      return `${n} ${word}`;
+    }
+    // Otherwise show the scalar fields - that's what a human would read off.
+    const scalars = keys
+      .filter((k) => v[k] === null || typeof v[k] !== "object")
+      .map((k) => `${k}: ${v[k]}`);
+    if (scalars.length) return scalars.join(", ").slice(0, 44);
+    return `${keys.length} field${keys.length === 1 ? "" : "s"}`;
+  }
+
   function outSummary(feedback) {
     if (!feedback) return "";
     const isErr = feedbackIsError(feedback);
     const body = stripOutputPrefix(feedback).trim();
     if (!body) return "";
+    // Errors are prose and read fine as-is; only reshape successful JSON.
+    if (!isErr) { const j = jsonSummary(body); if (j) return j; }
     const all = body.split("\n").map((l) => l.trim()).filter(Boolean);
     const lines = all.length;
     // On SUCCESS, skip a leading non-fatal warning/note some MCP tools print
@@ -2519,7 +2583,7 @@
       setupCard.id = "zs-setup";
       setupCard.hidden = true;
       const videoBtn = VIDEO_URL
-        ? `<a id="zs-setup-video" href="${VIDEO_URL}" target="_blank" rel="noopener">▶ Watch tutorial</a>`
+        ? `<a id="zs-setup-video" href="${VIDEO_URL}" target="_blank" rel="noopener">▶︎ Watch tutorial</a>`
         : "";
       setupCard.innerHTML =
         `<div id="zs-setup-head"><span id="zs-setup-logo">ZeroScript</span><span id="zs-setup-tag">Setup</span></div>` +
@@ -2662,7 +2726,7 @@
         if (bridgeOk) {
           toneClass = "standby";
           msg = `Standby. Start the agent, or just chat.`;
-          label = "▶ Start Roblox agent"; kind = "start";
+          label = "▶︎ Start Roblox agent"; kind = "start";
         } else if (addonOk) {
           // Roblox is down but another MCP server is live: allow a DEGRADED start
           // (yellow). The agent runs on the other server(s); Roblox tools stay
@@ -2673,7 +2737,7 @@
             : studioProcUp
               ? `<b>Studio open but not connected</b> - open <b>Assistant Settings &gt; MCP Servers</b> in Studio, or start without it.`
               : `<b>Roblox Studio offline</b> - start with your other MCP server(s).`;
-          label = "▶ Start agent (Roblox offline)"; kind = "start-degraded";
+          label = "▶︎ Start agent (Roblox offline)"; kind = "start-degraded";
         } else {
           toneClass = "warn"; warn = true;
           msg = !A.bridge.connected
@@ -2687,7 +2751,7 @@
                   : studioDown
                     ? `Open <b>Roblox Studio</b> &amp; enable its MCP server.`
                     : `Open <b>Roblox Studio</b> for the tools.`;
-          label = "▶ Start Roblox agent"; kind = "start";
+          label = "▶︎ Start Roblox agent"; kind = "start";
         }
         disabled = !bridgeOk && !addonOk;
       } else {
@@ -2843,7 +2907,7 @@
       // The setup tutorial lives INSIDE this banner (not as a separate card) so it
       // can never overlap the alert - the previous standalone onboarding card did.
       const videoLink = VIDEO_URL
-        ? `<a class="zs-banner-video" href="${VIDEO_URL}" target="_blank" rel="noopener">▶ Watch setup tutorial</a>`
+        ? `<a class="zs-banner-video" href="${VIDEO_URL}" target="_blank" rel="noopener">▶︎ Watch setup tutorial</a>`
         : "";
       b.innerHTML = `<div class="zs-banner-t">⚠ Lost connection to ZeroScript</div>
         <div class="zs-banner-m">The ZeroScript bridge stopped on your PC. Restart it (run start.bat and keep Roblox Studio open): the agent will reconnect automatically as soon as it is detected again.</div>
@@ -2895,7 +2959,7 @@
       if (A.started || !P.isFreshChat()) return;
       if (!nudged) {
         nudged = true;
-        toast("Tip: click “▶ Start Roblox agent” to let the AI control Roblox Studio.");
+        toast("Tip: click “▶︎ Start Roblox agent” to let the AI control Roblox Studio.");
       }
       if (!actionBtn) return;
       actionBtn.classList.add("zs-flash");
@@ -3225,14 +3289,55 @@
         // Measuring the raw editor then centres the cover on the giant editor's
         // midpoint - far below the visible input - so it "vanishes" off the box.
         // Intersect with the nearest clipping ancestor to track what's on screen.
-        for (let a = covNode.parentElement, i = 0; a && a !== document.body && i < 8; a = a.parentElement, i++) {
-          const ov = getComputedStyle(a).overflowY;
-          if (ov === "auto" || ov === "scroll" || ov === "hidden") {
-            const ar = a.getBoundingClientRect();
+        // The SAME clipping applies horizontally, and for the same reason: a
+        // composer whose editor is a flex item grows to its content width when a
+        // long unbroken line is injected, while an ancestor with overflow-x:hidden
+        // keeps the PAGE looking right. Seen on ChatGPT at Start, where the editor
+        // is filled with the (large) system prompt: the inner
+        // .prosemirror-parent widened past its `-my-2.5 flex overflow-x-hidden`
+        // wrapper, so the cover - position:fixed and sized to the raw rect - stuck
+        // out to the RIGHT of the composer card. Clip on each axis independently:
+        // the ancestor that clips X is not always the one that clips Y.
+        let clipY = false, clipX = false;
+        for (let a = covNode.parentElement, i = 0; a && a !== document.body && i < 8 && !(clipX && clipY); a = a.parentElement, i++) {
+          const st = getComputedStyle(a);
+          const clips = (v) => v === "auto" || v === "scroll" || v === "hidden";
+          const ar = a.getBoundingClientRect();
+          if (!clipY && clips(st.overflowY)) {
+            clipY = true;
             const top = Math.max(r.top, ar.top);
             const bottom = Math.min(r.bottom, ar.bottom);
             if (bottom > top) r = new DOMRect(r.left, top, r.width, bottom - top);
-            break;
+          }
+          if (!clipX && clips(st.overflowX)) {
+            clipX = true;
+            const left = Math.max(r.left, ar.left);
+            const right = Math.min(r.right, ar.right);
+            if (right > left) r = new DOMRect(left, r.top, right - left, r.height);
+          }
+        }
+        // Never paint outside the composer card. The cover is position:fixed and
+        // re-placed every rAF from a freshly measured rect, which is correct while
+        // the page is still - but a site that ANIMATES its composer updates layout
+        // AFTER our callback, so for the whole animation the cover trails one frame
+        // behind. Seen on ChatGPT at Start: injecting the system prompt grows the
+        // composer 58px -> 156px, the page gains a scrollbar, the content column
+        // narrows and the composer slides 29px left - while the cover kept the
+        // previous coordinates and hung 28px past the card's right edge. It only
+        // showed on the FIRST send, because afterwards the composer is already
+        // docked at the bottom and stops moving. Clamping to the composer frame
+        // makes a stale rect impossible to see: worst case the cover is briefly a
+        // few px small, which reads as nothing.
+        const frame = P.composerFrame && P.composerFrame();
+        if (frame) {
+          const fr = frame.getBoundingClientRect();
+          // Only clamp to a frame that really wraps the cover target, so a provider
+          // whose frame is narrower than its editor can never shrink the cover.
+          const cx = r.left + r.width / 2;
+          if (fr.width > 0 && fr.left <= cx && fr.right >= cx) {
+            const left = Math.max(r.left, fr.left);
+            const right = Math.min(r.right, fr.right);
+            if (right - left > 40) r = new DOMRect(left, r.top, right - left, r.height);
           }
         }
         // Optionally overshoot the editor box by PAD px on every side. Some

@@ -95,6 +95,35 @@ html.zs-light #zs-bar.zs-bar-anchored {
 #zs-bar.zs-prov-gemini #zs-action,
 #zs-bar.zs-prov-gemini #zs-state b { font-weight: 500; }
 
+/* ChatGPT's composer surface is a CSS grid:
+     "header header header" / "leading primary trailing" / ". footer ."
+   The bar mounts inside it (see chatgpt.js barMount) and must claim the
+   full-width `header` row - without a grid-area it would be auto-placed into the
+   editor's cell and collapse the input to zero width. The bottom margin keeps it
+   off the input row; the negative side margins let it reach the card's padding
+   edges so it reads as part of the composer, like on DeepSeek. */
+/* Selector carries .zs-bar-inline.zs-bar-inside on purpose: the generic
+   `#zs-bar.zs-bar-inline.zs-bar-inside` rule above is more specific than a plain
+   `#zs-bar.zs-prov-chatgpt`, so the margin below was silently losing to it. */
+#zs-bar.zs-bar-inline.zs-bar-inside.zs-prov-chatgpt {
+  grid-area: header;
+  /* The bottom margin has to clear more than it looks: the input row's wrapper
+     carries -my-2.5, so its painted box starts 10px ABOVE its grid row. At 6px
+     the bar's separator line ended up 4px INSIDE that box - and therefore under
+     the "Agent is working…" cover, which sits exactly on it (measured live: bar
+     bottom 739.1, band top 735.1). 14px puts the line ~4px clear of the box, so
+     the separator stays visible while the agent runs. */
+  margin: 0 -8px 14px;
+  width: auto;
+}
+/* The input row's wrapper carries -my-2.5, so its painted box overflows its grid
+   row by 10px top and bottom. The card only has 5px of vertical padding and
+   clips (overflow: clip), so with our header row added the placeholder text ran
+   into - and was sliced by - the card's bottom edge ("Agent is working…"). Give
+   the card enough bottom padding to clear that overhang, only while our bar is
+   inside it. */
+[class*="composer-surface"]:has(> #zs-bar.zs-prov-chatgpt) { padding-bottom: 12px; }
+
 /* Meta AI's composer card has a large corner radius (rounded-32 = 32px), so the
    full-width anchored bar's left/right ends run under the curve - the brand and
    the Discord/switch/support icons crowd the rounding. Inset the content by ~the
@@ -166,6 +195,12 @@ html.zs-light #zs-unstable {
   border-radius: 9px; border: 1px solid transparent;
   font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
   transition: filter 0.15s ease, background 0.15s ease;
+  /* The label's "▶" (U+25B6) has both a text and an emoji presentation. On sites
+     whose font stack has no text glyph for it (ChatGPT), the browser falls back
+     to the colour emoji font and the arrow renders as a blue emoji instead of a
+     flat character like everywhere else. The labels also carry U+FE0E after the
+     arrow, which requests the same thing on browsers without this property. */
+  font-variant-emoji: text;
 }
 #zs-action[data-kind="start"] {
   background: linear-gradient(135deg, #6366f1, #818cf8); color: #fff; border-color: transparent;
@@ -405,12 +440,19 @@ button.zs-site-opt:hover .zs-site-go { opacity: 1; transform: translateX(0); }
 }
 
 /* belt-and-suspenders: the typed text itself is rendered invisible
-   (DeepSeek's composer is a <textarea>; the Kimi build used a contenteditable) */
+   (DeepSeek's composer is a <textarea>; the Kimi build used a contenteditable)
+   Matched on [contenteditable] with NO VALUE, deliberately. These rules used to
+   require [contenteditable='true'], but a provider that locks the composer by
+   flipping the attribute to "false" (ChatGPT's setInputLock does exactly that)
+   dropped straight out of the selector: measured live, the same node went from
+   colour rgba(0,0,0,0) to rgb(255,255,255) and max-height 140px to none the
+   instant it was locked. So the mask and the height cap were inert for the whole
+   time the input was locked - precisely when they are needed. */
 textarea.zs-typing,
-div[contenteditable='true'].zs-typing,
-div[contenteditable='true'].zs-typing * { color: transparent !important; }
+div[contenteditable].zs-typing,
+div[contenteditable].zs-typing * { color: transparent !important; }
 textarea.zs-typing,
-div[contenteditable='true'].zs-typing { caret-color: transparent !important; }
+div[contenteditable].zs-typing { caret-color: transparent !important; }
 
 /* Keep the composer from ballooning while the extension injects the (large)
    system prompt or a big tool output. The typed text is transparent and hidden
@@ -423,7 +465,7 @@ div[contenteditable='true'].zs-typing { caret-color: transparent !important; }
    class is present only during agent injection, never while the user types, so
    this never clips real typing. */
 textarea.zs-typing,
-div[contenteditable='true'].zs-typing {
+div[contenteditable].zs-typing {
   max-height: 140px !important;
   overflow-y: hidden !important;
 }
@@ -451,6 +493,18 @@ div[contenteditable='true'].zs-typing {
    .zs-cmd-mask and this rule keeps every recreated code-block hidden with no
    flash. Inert on DeepSeek (no such elements). */
 message-content.zs-cmd-mask code-block { display: none !important; }
+/* ChatGPT (React): React re-creates the <pre> code blocks inside a reply on
+   every token, wiping any per-element .zs-tool-hide class. The .markdown
+   container keeps its identity, so the provider marks IT with .zs-cmd-mask and
+   this rule keeps every recreated <pre> hidden with no flash. Inert elsewhere. */
+.markdown.zs-cmd-mask pre { display: none !important; }
+/* ChatGPT, UNFENCED command block: when the model writes ###LUA###…###END_LUA###
+   as plain prose instead of a fenced block, the renderer splits it into dozens of
+   sibling <p>/<pre> nodes (seen live 2026-08: 68 of them for a 208-line payload).
+   The rule above only re-hides recreated <pre>, so the <p> half of that range
+   would flash on every token. The provider adds this class only when the range
+   covers the whole reply, i.e. the message IS the command. */
+.markdown.zs-cmd-mask-all > *:not(.zs-chip) { display: none !important; }
 /* GLM / Z.ai (Svelte): the reply's markdown subtree is recreated on stream
    updates and on the next send, wiping any per-element .zs-tool-hide class. The
    reply root (.chat-assistant) keeps its identity, so the provider marks IT with

@@ -65,6 +65,16 @@ const ZS = (() => {
           "envelope, so it was not recognised as a command. Wrap them like " +
           '{"command": "name", "params": { ...your parameters... }} - the parameter keys go INSIDE ' +
           '"params". Please retry.',
+        // The model named a REAL tool but under the wrong key - it wrote the call
+        // the way a function-calling API would (e.g. {"toolName": "get_studio_state",
+        // "studio_id": "..."}) instead of ZeroScript's envelope. Seen live on
+        // ChatGPT in a long session. Naming the wrong keys explicitly matters: a
+        // generic "bad JSON" note made the model rewrite the SAME shape.
+        toolKey:
+          "ERROR: you used the wrong key to name the command, so it was not recognised and did not " +
+          'run. The key must be exactly "command" - not "toolName", "tool", "name", "function" or ' +
+          '"action" - and every argument goes INSIDE "params", like ' +
+          '{"command": "name", "params": { ...your parameters... }}. Please retry.',
       };
       return notes[reason] || notes.malformed;
     },
