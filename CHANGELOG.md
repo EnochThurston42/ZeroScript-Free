@@ -12,6 +12,26 @@ All notable changes to ZeroScript Free are documented here.
   are left entirely to you.
 
 ### Fixed
+- **Meta AI: fixed large commands failing with "bad JSON".** Meta renders a
+  ```json block as an interactive viewer whose default *Tree* view does not
+  merely decorate the JSON - it **abridges** it: a large array or object is
+  replaced by a summary placeholder. A 19103-character `multi_edit` was present
+  in the page as 223 characters ending in `"edits":[1 item]`, so ZeroScript sent
+  the parser a truncated object and the command came back as a parse error every
+  time. This is also why the tool chip's token counter climbed while the reply
+  streamed and then **collapsed to about 44 tokens** the moment the block
+  finished rendering - the counter was faithfully reporting what could be read.
+  Command blocks are now switched to the viewer's *Raw* tab, which holds the
+  verbatim source; the 19103-character payload is read whole.
+- **Clearer diagnosis when Roblox refuses to parse Luau.** "Failed to parse
+  command code" is Studio's generic parse rejection, but ZeroScript always
+  answered it with "your code block was empty or the marker was wrong". When a
+  full code string *had* been sent, that advice pointed the model at a problem
+  that did not exist, so it re-sent the same payload and failed again. The hint
+  now only mentions the `###LUA###` markers when the code really was empty, and
+  otherwise reports how many characters were sent and names the real causes -
+  invalid syntax, or code too large/complex for the parser. (Measured live: a
+  `return 1+1+1+…` chain ran at 1006 characters and was rejected at 2006.)
 - **ChatGPT: fixed most tool calls failing outright.** ChatGPT renders code
   blocks with CodeMirror, which puts one element per line and **no newline
   characters at all** in the page. Reading a reply the usual way therefore

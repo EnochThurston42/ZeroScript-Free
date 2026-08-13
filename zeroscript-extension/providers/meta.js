@@ -198,6 +198,14 @@ const ZSProvider = (() => {
       // again (the reported spam). Detect the viewer (a .ur-code-block with no
       // <pre>) and hand the parser the cleaned JSON instead of the raw tree text.
       if (n.matches && n.matches(S.codeWrap) && !n.querySelector("pre")) {
+        // The viewer's Tree view does not just decorate the JSON, it ABRIDGES it:
+        // a large array/object is rendered as a summary placeholder instead of its
+        // contents, e.g. `…,"edits":[1 item]}}` for a 19k-char multi_edit payload
+        // (reproduced live 2026-08-13 - that is the "bad JSON" parse_error on any
+        // big command). The full source only exists in the viewer's Raw tab. Flip
+        // command-shaped viewers to Raw; the widget then renders a real <pre> and
+        // the branch below reads the complete JSON.
+        ensureRawView(n);
         t += cleanJsonViewer(n.textContent || "");
         return;
       }
@@ -206,6 +214,28 @@ const ZSProvider = (() => {
     };
     walk(root);
     return t;
+  }
+  // Switch a JSON-viewer widget from its Tree view to Raw, once. Tree ABRIDGES
+  // long values ("[1 item]") and interleaves ▶ glyphs; Raw is the verbatim source
+  // inside a real <pre>. Only touched for command-shaped blocks so a viewer the
+  // user is reading for their own sake is left alone. React may not have rendered
+  // the Raw <pre> by the time this call returns - that is fine: the core re-reads
+  // the reply every sweep, so the following read picks up the complete text (a
+  // partial read just looks like one more streaming tick).
+  const _rawSwitched = new WeakSet();
+  function ensureRawView(wrap) {
+    try {
+      if (_rawSwitched.has(wrap)) return;
+      const txt = wrap.textContent || "";
+      if (!/"(?:command|tool)"\s*:/.test(txt)) return;
+      const btn = [...wrap.querySelectorAll('button,[role="tab"]')].find(
+        (b) => (b.textContent || "").trim().toLowerCase() === "raw"
+      );
+      if (!btn) return;
+      _rawSwitched.add(wrap);
+      btn.click();
+      diag("meta.jsonviewer.raw", { len: txt.length });
+    } catch {}
   }
   // Strip the JSON-viewer widget's chrome so only the JSON object is left:
   // remove the tree-expander triangles (▶ ▼ ► ◀ ▲ ▾ …) that Meta interleaves

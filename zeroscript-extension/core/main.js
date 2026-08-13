@@ -1060,8 +1060,20 @@
     }
     if (name === "execute_luau") {
       const err = r.error || "";
+      // "Failed to parse command code" is StudioMCP's GENERIC parse rejection: an
+      // empty/mis-marked block is only ONE of its causes. The others are ordinary
+      // Luau syntax errors and - seen live on Meta AI 2026-08-13 - code that is
+      // syntactically fine but too big for the parser: a `return 1+1+1+…` chain
+      // ran at ~500 terms (1006 chars) and was rejected at ~1000 (2006 chars).
+      // Telling the model its block was empty when we DID send it a full code
+      // string sends it to fix something that isn't broken; it retries the same
+      // payload and fails again (the reported spam of parse errors). Only give the
+      // marker advice when the code we actually sent really was empty.
+      const luaCode = args.code || "";
       const hint = err.includes("Failed to parse command code")
-        ? "Your code block was empty or the marker was wrong. Use exactly ###LUA### (three hashes) - never ###LUA---. The code must be between ###LUA### and ###END_LUA###."
+        ? !luaCode.trim()
+          ? "Your code block was empty or the marker was wrong. Use exactly ###LUA### (three hashes) - never ###LUA---. The code must be between ###LUA### and ###END_LUA###."
+          : `Roblox refused to PARSE the code (${luaCode.length} chars sent, so it was not empty). Either the Luau syntax is invalid, or the code is too large/complex for the parser - a single huge expression or a very long script can be rejected outright. Check the syntax first; if it looks correct, split the work into several smaller calls.`
         : err.includes("attempt to") || err.includes("nil value")
           ? "Lua runtime error. Check that the API you are calling exists (use game:GetService() to access services). Make sure you use 'return' to output values, not 'print()'."
           : "Check your Lua syntax, make sure you use 'return' to output values (not 'print()'), and that all APIs you call exist in the current Roblox Studio context.";
