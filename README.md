@@ -83,6 +83,15 @@ Go to https://chat.deepseek.com (recommended), https://chatgpt.com, https://gemi
 - Control play-testing
 - **Remember your project across sessions** persistent project memory saved inside your place
 
+## New in 1.5.2
+
+- **ChatGPT: you can chat normally again without starting an agent.** On a blank ChatGPT tab the extension refused to let a message send until you clicked "Start Roblox agent" every other provider only suggests it, ChatGPT was the odd one out.
+- **ChatGPT: it no longer forgets it can actually run commands.** ChatGPT summarises its own context mid-session and the first thing it drops is the *mechanism* it then tells you "I can't invoke those commands in this session" while the extension sits there, ready. Its instructions are now re-stated automatically, carried along on a tool result so they cost no extra message and stay hidden from you (a "Reminder" chip marks them). Tool results are never shortened to make room.
+- **ChatGPT: an image you send is now used as reference for the work**, instead of being answered with a freshly generated picture. Ask explicitly if you *do* want an image.
+- **A finished command is no longer stranded as "not run"** after a long reply (seen on Qwen writing for 400s and more), where the agent used to give up eight seconds after the model stopped.
+- **A clear message when ZeroScript updates while a tab is open.** This used to be reported as "the bridge stopped on your PC run start.bat", sending you to fix something that was never broken. It now tells you the page needs reloading and offers a Reload button.
+- **The AI no longer insists your bridge is offline without checking** it must run a command first before saying so.
+
 ## New in 1.5.1
 
 - **ChatGPT support (chatgpt.com)** an eighth provider. Screenshots and image input are off there on purpose: ChatGPT's free tier limits files and images on a separate quota from messages, so vision would only work part of the day. The model picker and reasoning mode stay entirely your choice.

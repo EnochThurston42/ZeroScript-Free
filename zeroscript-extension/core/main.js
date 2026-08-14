@@ -160,6 +160,13 @@
     // others) can drift away from the exact command names over a long session,
     // so we re-inject the list every REMIND_TOOLS_EVERY calls (see agentLoop).
     toolCallsSinceReminder: 0,
+    // When the system prompt was last re-stated. Diagnostic only - whether one
+    // is OWED is derived from the conversation itself, never from a counter
+    // (see sinceLastSys / sysResendDue).
+    sysResendAt: 0,
+    // This page outlived its extension build - nothing works until a reload.
+    // Latched (never cleared): the context cannot come back. See bg().
+    staleExtension: false,
     bridge: { connected: false, mcpAlive: false, tools: 0 },
     // Images from the most recent tool result, stashed by runTool for the
     // upcoming submitAndGetBase/typeAndSend call to attach as the LAST step
@@ -744,18 +751,40 @@
   // ════════════════════════════════════════════════════════════════════════
   //  TOOL EXECUTION  (always returns a feedback string for the model)
   // ════════════════════════════════════════════════════════════════════════
+  // An ORPHANED content script: the extension was reloaded, updated or disabled
+  // while this page stayed open, so the script still running here belongs to a
+  // version of the extension that no longer exists. Chrome tears down its
+  // messaging port, and every chrome.runtime call then fails INSTANTLY with
+  // "Extension context invalidated".
+  //
+  // This must be told apart from a real bridge outage. They are opposite
+  // problems with opposite fixes: a bridge outage is fixed by start.bat and
+  // resolves itself, while this one can ONLY be fixed by reloading the page and
+  // never recovers on its own. Lumping them together (the old behaviour) told
+  // the model "the local ZeroScript bridge is unreachable", which sent the user
+  // to check a bridge that was perfectly healthy. Diagnosed 2026-08-14 by the
+  // giveaway timing: a genuine outage takes 8s (background.js `send` waits via
+  // waitForConnection first), an invalidated context comes back in ~1ms.
+  //
+  // Every user meets this eventually - Chrome auto-updates extensions under
+  // open tabs - so it is worth its own message.
+  const isContextInvalidated = (m) =>
+    /Extension context invalidated|Receiving end does not exist|message port closed/i.test(m || "");
+
   function bg(msg) {
     return new Promise((resolve) => {
+      const fail = (m) => resolve({
+        ok: false,
+        kind: isContextInvalidated(m) ? "stale-extension" : "disconnected",
+        error: m,
+      });
       try {
         chrome.runtime.sendMessage(msg, (resp) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, kind: "disconnected", error: chrome.runtime.lastError.message });
-          } else {
-            resolve(resp || { ok: false, kind: "disconnected", error: "no response from background" });
-          }
+          if (chrome.runtime.lastError) fail(chrome.runtime.lastError.message);
+          else resolve(resp || { ok: false, kind: "disconnected", error: "no response from background" });
         });
       } catch (e) {
-        resolve({ ok: false, kind: "disconnected", error: String(e) });
+        fail(String(e && e.message || e));
       }
     });
   }
@@ -1053,6 +1082,16 @@
       }
       const text = r.text && r.text.length ? r.text : "(tool returned an empty result)";
       return `Output of '${name}':\n${text}`;
+    }
+    // Orphaned content script - a page reload is the only cure, so say exactly
+    // that instead of blaming the bridge (see bg / isContextInvalidated).
+    if (r.kind === "stale-extension") {
+      ui.banner("warn", "Reload this page",
+        "ZeroScript was updated or reloaded while this tab was open, so this page is running an " +
+        "old copy of it and commands can no longer run. Reload the page (F5) to reconnect - your " +
+        "bridge and Roblox Studio are unaffected.");
+      diag("bridge.staleExtension", { name, error: r.error });
+      return ZS.FEEDBACK.staleExtension;
     }
     if (r.kind === "disconnected") return ZS.FEEDBACK.bridgeOffline;
     if (r.kind === "timeout") {
@@ -1408,6 +1447,13 @@
               diag("tools.reminder", { after: REMIND_TOOLS_EVERY });
             }
           }
+          // This result becomes a turn, so it counts toward the re-statement
+          // budget - context volume is what makes the site summarise, and the
+          // volume is overwhelmingly tool results, not how often the user types.
+          bumpSys("results");
+          // Ride the system-prompt re-statement out on this result if one is due
+          // and it fits (see withSysResend - the result itself is never trimmed).
+          toSend = withSysResend(toSend);
           const images = A.pendingImages;
           A.pendingImages = null;
           diag("images.consumed", { count: images ? images.length : 0 });
@@ -1567,6 +1613,178 @@
     ui.toast("Stopping…");
   }
 
+  // The full system prompt for the CURRENT provider and user settings. One
+  // definition, used both by the bootstrap and by the periodic re-injection, so
+  // the two can never drift apart.
+  function systemPrompt() {
+    return ZS.buildSystemPrompt({
+      siteName: P.displayName,
+      customPrompt: ui.getCustomPrompt(),
+      providerNotes: P.promptExtra || "",
+    });
+  }
+
+  // ── Periodic system-prompt re-injection (opt-in, per provider) ────────────
+  // Some sites aggressively summarise their own context mid-conversation. When
+  // that happens the model keeps the gist of the task but loses the MECHANISM:
+  // it forgets that an extension reads its replies and executes them, and starts
+  // answering "I can't invoke those commands in this session" while the
+  // extension sits there ready and waiting. Observed repeatedly on ChatGPT.
+  //
+  // The periodic tools reminder does NOT fix this: it re-anchors command NAMES,
+  // but it never restates that the commands actually run. So providers that need
+  // it set `resendSystemEvery`, and the whole prompt goes back in.
+  //
+  // Delivery rides on the next injected tool result rather than costing its own
+  // message - free and invisible. But that channel dries up in exactly the case
+  // this exists for (a model that has forgotten it can call tools stops calling
+  // them, so no results flow), so a fallback sends it as its own masked turn
+  // once the window has elapsed with nothing to piggyback on.
+  const RESEND_SYS_EVERY = P.resendSystemEvery || 0;
+  // Injected tool results get their own, larger budget (see sysResendDue).
+  const RESEND_SYS_EVERY_RESULTS = 12;
+
+  // How much conversation has accumulated since the operating instructions were
+  // last stated. PERSISTED per conversation, because both simpler designs failed
+  // in opposite directions - each caught live on 2026-08-14:
+  //
+  //  - An in-memory counter RESETS on every page reload, while the session
+  //    itself survives one (A.started is persisted). After an F5, or a silent
+  //    Chrome extension auto-update, the tally restarted and the re-statement
+  //    could be postponed indefinitely.
+  //  - Walking the DOM back to the last SYS_MARKER turn is reload-proof but
+  //    UNDER-counts badly: these sites virtualize. Measured on a real ChatGPT
+  //    session that had long passed the threshold - only 12 turns were rendered,
+  //    the marker was not among them (so the walk silently counted from the top
+  //    of the window) and it saw 5 injected results instead of the true total.
+  //
+  // Counting at INJECTION time and persisting sidesteps both: it is exact, and
+  // virtualization cannot erase it. The DOM walk is kept as a floor, since a
+  // conversation that visibly shows the threshold is due no matter what storage
+  // says (e.g. a session adopted from another device, or storage cleared).
+  const sysKey = () => `zsSys:${P.conversationKey() || "new"}`;
+  let sysCount = { users: 0, results: 0 };
+  let sysCountKey = "";
+
+  // Hydrate from storage. Only meaningful at startup / on a conversation switch;
+  // it never overwrites counts already accumulated in this tick's memory (a
+  // bump that landed while the async read was in flight must not be lost).
+  async function loadSysCount() {
+    const k = sysKey();
+    if (k === sysCountKey) return sysCount;
+    sysCountKey = k;
+    const local = sysCount;
+    sysCount = { users: 0, results: 0 };
+    try {
+      const r = await new Promise((res) => chrome.storage.local.get(k, res));
+      const saved = r && r[k];
+      if (saved) sysCount = {
+        users: Math.max(saved.users || 0, local.users || 0),
+        results: Math.max(saved.results || 0, local.results || 0),
+      };
+    } catch {}
+    return sysCount;
+  }
+  function saveSysCount() {
+    try { chrome.storage.local.set({ [sysCountKey]: sysCount }); } catch {}
+  }
+  // Increment SYNCHRONOUSLY, persist asynchronously. sysResendDue() reads
+  // sysCount in the same tick as the bump that should trip it, so deferring the
+  // increment into the storage promise made the tally lag a full turn behind and
+  // the threshold was never seen at the moment it mattered (caught live: 12 tool
+  // results, counter still reading 11, no rider). Storage is a durability
+  // mechanism here, not the source of truth for the current tick.
+  function bumpSys(field) {
+    if (!RESEND_SYS_EVERY) return;
+    if (sysCountKey !== sysKey()) { sysCountKey = sysKey(); }
+    sysCount[field]++;
+    saveSysCount();
+  }
+  function resetSysCount() {
+    sysCount = { users: 0, results: 0 };
+    saveSysCount();
+  }
+
+  // Lower bound read straight from what is on screen (see above).
+  function sinceLastSysInDom() {
+    const items = P.allItems();
+    let users = 0, results = 0;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      const txt = P.classifyText(it, ".zs-chip");
+      // The bootstrap turn and every rider both carry the marker - either one
+      // means the rules were fully stated here, so stop counting.
+      if (txt.includes(ZS.SYS_MARKER)) break;
+      if (!P.isUserItem(it)) continue;
+      if (ZSParse.isInjectedFeedback(txt)) results++;
+      else users++;
+    }
+    return { users, results };
+  }
+
+  function sinceLastSys() {
+    const dom = sinceLastSysInDom();
+    return {
+      users: Math.max(sysCount.users, dom.users),
+      results: Math.max(sysCount.results, dom.results),
+    };
+  }
+
+  // A re-statement is owed once EITHER budget is spent. Two triggers because
+  // they measure different things: user turns track a long back-and-forth, while
+  // injected results track context VOLUME - and volume is what actually makes
+  // the site summarise. Measured live on 2026-08-14: in a real session 5 of the
+  // 6 "user" turns were injected tool results and only ONE was typed by Seb, so
+  // a user-turn-only trigger sat at 1/6 while five full tool payloads had
+  // already landed. The results budget is the one that fires in practice.
+  function sysResendDue() {
+    if (!RESEND_SYS_EVERY) return false;
+    const { users, results } = sinceLastSys();
+    const due = users >= RESEND_SYS_EVERY || results >= RESEND_SYS_EVERY_RESULTS;
+    // Logged sparsely on purpose: this is consulted on EVERY tool result, and an
+    // entry each time would flush the 300-slot diag ring of everything else -
+    // exactly the history you need when something goes wrong. The verdict turn
+    // and every 4th result is enough to reconstruct the tally.
+    if (due || results % 4 === 0) {
+      diag("sys.tally", {
+        users, results, due,
+        mem: `${sysCount.users}/${sysCount.results}`,
+        need: `${RESEND_SYS_EVERY}u ${RESEND_SYS_EVERY_RESULTS}r`,
+      });
+    }
+    return due;
+  }
+  // Attach the prompt to an outgoing tool result IF it fits. The result is never
+  // truncated to make room: the passenger is dropped and the flag stays raised,
+  // so it rides the next result instead. A tool result the model is waiting on
+  // is always worth more than a reminder.
+  function withSysResend(text) {
+    if (!sysResendDue()) return text;
+    const prompt = systemPrompt();
+    const rider =
+      "\n\n────────────────────────────────\n" +
+      ZS.RESEND_MARKER + "\n" +
+      "(System note from ZeroScript - an automatic re-statement of your operating " +
+      "instructions, NOT a new request and NOT something to reply to. This conversation " +
+      "may have been summarised, which drops the part explaining how you actually run " +
+      "commands. To be explicit: the ZeroScript extension IS running in this page right " +
+      "now, it DOES read your replies, and the commands below DO execute for real - the " +
+      "results you have been receiving are proof of it. Keep using them exactly as " +
+      "described. Just carry on with the task; do not acknowledge this note.)\n" +
+      prompt;
+    const cap = P.sendCharBudget || Infinity;
+    if (text.length + rider.length > cap) {
+      // Stays due - the next (smaller) result carries it.
+      diag("sys.resendDeferred", { result: text.length, rider: rider.length, cap });
+      return text;
+    }
+    const spent = sinceLastSys();
+    resetSysCount();
+    A.sysResendAt = Date.now();
+    diag("sys.resend", { via: "toolResult", chars: rider.length, ...spent });
+    return text + rider;
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   //  SESSION BOOTSTRAP  ("Starting Up" animated chip, shown in the conversation)
   // ════════════════════════════════════════════════════════════════════════
@@ -1611,7 +1829,7 @@
           `Could not switch ${P.displayName} to the required mode. Start a new chat or reload the page, then try again.`);
         return;
       }
-      const prompt = ZS.buildSystemPrompt({ siteName: P.displayName, customPrompt: ui.getCustomPrompt() });
+      const prompt = systemPrompt();
       const base = await submitAndGetBase(prompt);
       if (!alive()) return;
       // (syncSessionState pins A.startingKey to the conversation id once the chat
@@ -1684,6 +1902,10 @@
     tool:    SVG('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2-2z"/>'),
     result:  SVG('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'),
     check:   SVG('<polyline points="20 6 9 17 4 12"/>'),
+    // Bell - the mid-session system-prompt re-statement. Deliberately NOT the
+    // gear: the gear means "the agent is starting up", and a reminder is the
+    // opposite (a session already long enough to need re-anchoring).
+    remind:  SVG('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>'),
     error:   SVG('<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
     gear:    SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.82 1.17V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 8 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15H4.5a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 6 8a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 11 4.6h.09A1.65 1.65 0 0 0 12 3.09 2 2 0 0 1 16 3v.09A1.65 1.65 0 0 0 19 4.6l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 21.4 11h.1a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.5 1z"/>'),
   };
@@ -1695,6 +1917,7 @@
     if (phase === "done") return ICONS.check;
     if (phase === "result") return ICONS.result;
     if (phase === "sys") return ICONS.gear;
+    if (phase === "remind") return ICONS.remind;
     return ICONS[category] || ICONS.tool;
   }
 
@@ -1883,6 +2106,28 @@
       // element itself survive. So "already decorated" must always be
       // double-checked against the chip actually being present in the DOM.
       const chipGone = !item.querySelector(".zs-chip");
+
+      // 1a. A mid-session RE-STATEMENT of the system prompt. Checked before the
+      //     bootstrap branch because it carries SYS_MARKER too (that marker is
+      //     what hides it), and without this it inherited the bootstrap's
+      //     "Starting Up" gear - which reads as if the agent restarted, exactly
+      //     the confusion Seb reported. Never animated: nothing is starting.
+      if (txt.includes(ZS.RESEND_MARKER)) {
+        if (item.dataset.zs !== "resend" || chipGone) {
+          // The rider travels ON a tool result, so this one turn is both things.
+          // Name the tool in the detail rather than dropping it - otherwise that
+          // result is the only one in the conversation with no visible outcome.
+          const m = txt.match(/Output of '([^']+)'/);
+          this.chip(item, {
+            label: "Reminder",
+            detail: m ? `with ${m[1]} result` : "",
+            category: "remind", phase: "remind", cls: "sys", whole: true,
+          });
+          item.dataset.zs = "resend";
+          item.dataset.zphase = "remind";
+        }
+        return;
+      }
 
       // 1. System-prompt bootstrap turn → animated while starting, gear when done.
       if (txt.includes(ZS.SYS_MARKER)) {
@@ -2077,8 +2322,12 @@
         // the page/extension was reloaded while it sat un-executed and the watchdog
         // refuses to run a reload-restored generation (leak guard). Also never a
         // false green ✓; show a neutral, greyed "not run" (we do NOT auto-execute it).
+        // Tied to RESUME_FRESH_MS, never a separate literal: this must not paint
+        // "not run" while the resume watchdog is still entitled to execute the
+        // command. With the two numbers out of step (8s here vs the watchdog's
+        // window) a command that WAS about to run got labelled dead first.
         const staleLastOrphan = neverRun && item === P.lastAssistant() && !live &&
-          Date.now() - A.lastGenAt > 8000;
+          Date.now() - A.lastGenAt > RESUME_FRESH_MS;
         const orphanPending = !stopped && (supersededOrphan || staleLastOrphan);
         // Handoff window: a JUST-finished last-assistant command with no result yet
         // that the loop has not taken over (A.running not yet true, so `live` is
@@ -2087,8 +2336,10 @@
         // loop paints its own chip - most visible on the instant virtual commands
         // (list_mcp_servers/list_commands). Keep it spinning instead; staleLastOrphan
         // takes over after 8s if the loop genuinely never runs it.
+        // Same window as the watchdog: while it can still fire, the honest state
+        // is "waiting to run" (spinner), not a settled verdict either way.
         const pendingExec = !stopped && !orphanPending && !live &&
-          neverRun && item === P.lastAssistant() && Date.now() - A.lastGenAt <= 8000;
+          neverRun && item === P.lastAssistant() && Date.now() - A.lastGenAt <= RESUME_FRESH_MS;
         let phase = stopped ? "err" : (orphanPending ? "idle" : ((live || pendingExec) ? "run" : "done"));
         let detail = stopped ? "stopped" : (orphanPending ? "not run" : "");
         // Error-aware settle: a command whose injected result RIGHT BELOW is an
@@ -2670,11 +2921,23 @@
       if (!bar) return;
       // indicator = an optional leading dot/spinner; msg = the wrappable text.
       let toneClass = "standby", indicator = "", msg = "", label = "", kind = "", disabled = false, warn = false;
+      // Orphaned page: check FIRST and return. Nothing below can be true any
+      // more - the status poll is stopped, so every value it would render (the
+      // green dot, "Agent active", the tool count) is a frozen snapshot of a
+      // build this page no longer talks to. Leaving those up contradicted the
+      // "reload this page" banner sitting right next to them, which is exactly
+      // the confusing state Seb caught on 2026-08-14.
+      // No action button here: the banner already carries the Reload one.
+      if (A.staleExtension) {
+        if (dot) dot.className = "off";
+        toneClass = "warn"; warn = true;
+        msg = `<b>Disconnected</b> · reload this page to reconnect`;
+      }
       // Show "Starting…" for the whole bootstrap. If the user actually leaves for
       // a new (empty) chat, syncSessionState clears A.starting, so this naturally
       // falls back to that chat's own state - no fragile per-key check here (fresh
       // chats share a key, and the conversation id only appears mid-bootstrap).
-      if (A.starting) {
+      else if (A.starting) {
         toneClass = "starting";
         indicator = `<span class="zs-spin"></span>`;
         msg = `Starting the Roblox agent…`;
@@ -2905,6 +3168,28 @@
       }
       renderBar();
       refreshSetup(s.connected);
+    }
+
+    // The page outlived its extension build (reload / Chrome auto-update /
+    // disable+enable). Distinct from bridgeAlert on purpose: opposite cause,
+    // opposite fix, and this one NEVER self-heals, so the banner has no Close
+    // button and offers the reload directly rather than telling the user to go
+    // restart a bridge that was never down.
+    function staleExtensionAlert() {
+      // Latch it BEFORE painting, so the bar drops its frozen "Agent active ·
+      // N tools" in the same pass and never contradicts the banner.
+      A.staleExtension = true;
+      renderBar();
+      if (bridgeBannerEl) { bridgeBannerEl.remove(); bridgeBannerEl = null; }
+      if (root.querySelector(".zs-banner.zs-stale")) return;
+      const b = document.createElement("div");
+      b.className = "zs-banner limit zs-stale";
+      b.innerHTML = `<div class="zs-banner-t">⚠ Reload this page to reconnect ZeroScript</div>
+        <div class="zs-banner-m">ZeroScript was updated or reloaded while this tab was open, so this page is still running the old copy and commands can no longer run. Your bridge and Roblox Studio are fine - only this page needs refreshing.</div>
+        <div class="zs-banner-acts"><button class="zs-banner-reload">Reload page</button></div>`;
+      b.querySelector(".zs-banner-reload").addEventListener("click", () => location.reload());
+      root.appendChild(b);
+      bridgeBannerEl = b;
     }
 
     // Show (on=true) / clear (on=false) the bridge-disconnected red banner.
@@ -3449,7 +3734,7 @@
     }
 
     build();
-    return { setStatus, setStarted, setStarting, showStop, markStopping, inputCover, toast, banner, showImages, nudgeStart, updateStartGate, refreshSetup, getCustomPrompt, getCustomMcpServers, openMenu: (toSupport) => openMenuFn && openMenuFn(toSupport) };
+    return { setStatus, staleExtensionAlert, setStarted, setStarting, showStop, markStopping, inputCover, toast, banner, showImages, nudgeStart, updateStartGate, refreshSetup, getCustomPrompt, getCustomMcpServers, openMenu: (toSupport) => openMenuFn && openMenuFn(toSupport) };
   })();
 
   // ── Live token + timer, shown ONLY on a tool call's chip detail. The
@@ -3708,8 +3993,29 @@
     }
   });
 
-  bg({ type: "status" }).then((s) => s && ui.setStatus(s));
-  setInterval(() => bg({ type: "status" }).then((s) => s && ui.setStatus(s)), 5000);
+  // Status poll. An orphaned content script (see bg / isContextInvalidated) gets
+  // a failure object back whose `connected` is undefined, which setStatus would
+  // read as "the bridge just dropped" and answer with the red "run start.bat"
+  // banner - sending the user to fix a bridge that is perfectly healthy, with
+  // the one thing that WOULD fix it (reload the page) never mentioned. Catch it
+  // before setStatus, say the right thing, and stop polling: the context can
+  // never come back, so every later tick would just repeat the same failure.
+  let statusTimer = 0;
+  function onStatus(s) {
+    if (!s) return;
+    if (s.kind === "stale-extension") {
+      clearInterval(statusTimer);
+      ui.staleExtensionAlert();
+      diag("bridge.staleExtension", { via: "status", error: s.error });
+      return;
+    }
+    ui.setStatus(s);
+  }
+  // Hydrate the persisted re-statement budget for this conversation up front, so
+  // the first tool result after a reload already knows the real tally.
+  loadSysCount();
+  bg({ type: "status" }).then(onStatus);
+  statusTimer = setInterval(() => bg({ type: "status" }).then(onStatus), 5000);
 
   // Session state is derived from the ACTUAL chat, but sites VIRTUALIZE their
   // message lists: the system-prompt turn is dropped from the DOM once it
@@ -3905,6 +4211,7 @@
       // A fresh user message = fresh intent: clear any previous manual stop so
       // the loop is allowed to run again.
       A.userStopped = false;
+      bumpSys("users");
       captureSendToken(); // identity of the assistant turn before this reply
       // A Stop clicked during this 300ms window sets A.userStopped → honor it and
       // do NOT start the loop (otherwise the stop is silently ignored and the
@@ -3948,7 +4255,23 @@
   //     few seconds; a turn rendered by load/scroll has no recent generation.
   //   • turnHalted - the turn itself carries the site's "stopped" marker.
   // Each turn is still resumed at most once (zResume marker).
-  const RESUME_FRESH_MS = 8000;
+  // Freshness window for the resume watchdog. Widened from 8s to 3 minutes
+  // (2026-08) because 8s was the ONLY thing standing between an orphaned command
+  // and its execution, and it was firing on legitimate work: a long generation
+  // (a Qwen reply seen live writing for 400s+) makes the loop finalize early, the
+  // generation then genuinely ends, lastGenAt goes stale within 8s and the
+  // completed command is stranded forever with a grey "not run" - the user's
+  // whole point being that they wanted it to RUN. This is safe because every
+  // guard below is independent of lastGenAt and covers the cases this window was
+  // nominally protecting: bootBaselineId (a reload-restored generation),
+  // maxTurnId (a scrolled-back old turn), the result-below settled-history test
+  // (survives a reload, unlike the executed map), the `executed` map, the
+  // zResume dedupe and A.userStopped. As the `executed` map's own comment puts
+  // it, re-execution is idempotent regardless of any lastGenAt misfire - "the
+  // hard part (is this a live turn?) can be wrong without harm". The window is
+  // kept, rather than removed, so a tab left open for hours still never
+  // spontaneously fires a command on some later unrelated DOM churn.
+  const RESUME_FRESH_MS = 180000;
   setInterval(() => {
     if (!A.started || A.running || A.starting || A.injecting) return;
     if (document.hidden) return;                         // AI tab not foreground → don't parse/exec off-screen (agentLoop gates too)
@@ -4009,6 +4332,43 @@
     A.sendToken = null;
     agentLoop(P.assistantCount() - 1);
   }, 1000);
+
+  // ── System-prompt re-injection fallback ───────────────────────────────────
+  // The piggyback path (withSysResend) is free but needs a tool result to ride
+  // on, and the failure this feature exists for - the model forgetting it can
+  // run commands at all - is precisely the state where no tool results are being
+  // produced. So when a re-statement has been owed for a while and nothing has
+  // carried it, send it as its own turn: masked exactly like the bootstrap (the
+  // SYS_MARKER makes the camouflage sweep hide the whole item), so the user sees
+  // nothing but ChatGPT's short acknowledgement.
+  //
+  // This costs one message from the site's quota, which is why it is a fallback
+  // and not the primary path. Deliberately conservative about WHEN it may fire:
+  // never mid-generation, never while the loop or bootstrap owns the composer,
+  // and never while the user has text sitting in the composer (we would wipe
+  // what they were typing).
+  const SYS_FALLBACK_IDLE_MS = 20000;
+  setInterval(async () => {
+    if (!sysResendDue()) return;
+    if (!A.started || A.running || A.starting || A.injecting) return;
+    if (document.hidden || A.userStopped) return;
+    if (P.isGenerating()) return;
+    // The user is composing - their draft owns the editor, leave it alone.
+    try { if ((P.editorText() || "").trim() !== "") return; } catch { return; }
+    // Give the cheap path a fair chance first: only step in once the turn has
+    // been settled and quiet for a while with no tool result to ride on.
+    if (Date.now() - A.lastGenAt < SYS_FALLBACK_IDLE_MS) return;
+    const spent = sinceLastSys();
+    resetSysCount();
+    A.sysResendAt = Date.now();
+    diag("sys.resend", { via: "ownTurn", ...spent });
+    try {
+      const base = await submitAndGetBase(systemPrompt());
+      await waitForResponse(base);
+    } catch (e) {
+      diag("sys.resendFailed", { err: String(e && e.message || e) });
+    }
+  }, 5000);
 
   log(`ZeroScript content script ready (provider: ${P.id})`);
 })();

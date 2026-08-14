@@ -464,6 +464,17 @@ const ZSProvider = (() => {
   //   - a synthetic PASTE of the same 1200 lines is far faster (18ms), but it is
   //     UNUSABLE here: ChatGPT turns a pasted message into a file attachment on
   //     send. See pasteEditorText for the full story. Typing it is.
+  // ChatGPT's own hard input cap, MEASURED live 2026-08-14 (not a guess, and not
+  // the perf limit below): the composer's submit button silently goes `disabled`
+  // once the editor holds more than ~139 300 characters - 139 300 sends, 139 500
+  // does not, reproducible across repeats. It is a CLIENT-side gate, so an
+  // oversized message is not rejected with a visible "too long" error, it simply
+  // cannot be sent at all; nothing in the bundles exposes the constant, so the
+  // boundary was bracketed by filling the editor and reading button.disabled.
+  // 120 000 is kept as our cap: it is chosen for the freeze cost documented
+  // above, and it happens to sit comfortably under the real ceiling, so a result
+  // we are willing to send is always a result ChatGPT will accept.
+  const SEND_HARD_CAP = 139300;  // measured; for reference and headroom checks
   const SEND_MAX_CHARS = 120000; // characters are essentially free (see above)
   const SEND_MAX_LINES = 600;    // the line count is what costs, and we type it
   const INSERT_CHUNK_LINES = 25; // measured sweet spot: 3.0s total, 0.4s worst freeze
@@ -726,6 +737,17 @@ const ZSProvider = (() => {
   // so the core never persists it as "started"; /c/<id> = a real conversation.
   const conversationKey = () => (/^\/c\//.test(location.pathname) ? location.pathname : "");
 
+  // ── ChatGPT-only system-prompt rules ──────────────────────────────────────
+  // Appended to the shared system prompt via core/config.js's `providerNotes`
+  // hook, so no other provider sees a word of this.
+  //
+  // Why ChatGPT needs the image rule and the others don't: ChatGPT reaches for
+  // its own image GENERATION on any turn that carries an image, and answers by
+  // producing a new picture instead of doing the Roblox work the image was
+  // meant to illustrate. Its native image tool also runs in the sandbox that
+  // cannot touch the user's project, so a generated image is a dead end here.
+  const PROMPT_EXTRA = `- WHEN THE USER SENDS AN IMAGE: by default it is REFERENCE MATERIAL for the work they want done in their project - a screenshot of a bug, a mockup of the UI they want, a photo of the thing to build, a picture of what is wrong in Studio. Look at it, use it to understand what they want, and then do that work with the ZeroScript commands. Do NOT generate a new image from it, and do NOT treat it as an image-editing request. Only generate an image when the user EXPLICITLY asks you to create, generate, draw or edit one ("make me an image of...", "generate a texture", "edit this picture"). If what they want from the image is genuinely unclear, ask them in one short sentence rather than guessing - and never guess "they want a picture".`;
+
   // ── User-send interception ────────────────────────────────────────────────
   function installSendHooks(handlers) {
     document.addEventListener(
@@ -736,10 +758,14 @@ const ZSProvider = (() => {
         if (!ed || !ed.contains(e.target)) return;
         if (editorText().trim() === "") return;
         if (handlers.isBlocked()) return;
+        // No session yet → nudge toward Start, but NEVER block the send. The
+        // user is entitled to just chat with ChatGPT; the extension is opt-in.
+        // This used to preventDefault + stopImmediatePropagation (ported from an
+        // older, stricter pattern), which made a blank ChatGPT tab impossible to
+        // type in until an agent was started - a regression against every other
+        // provider. Matches deepseek.js: "nudge only; never block plain chat".
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return; // existing conversation → not ours to gate
-          e.preventDefault();
-          e.stopImmediatePropagation();
           handlers.onBlockedAttempt();
           return;
         }
@@ -766,10 +792,9 @@ const ZSProvider = (() => {
         const btn = t && t.closest && t.closest(S.submitBtn);
         if (!btn || isStopBtn(btn)) return;
         if (handlers.isBlocked()) return;
+        // Same as the keydown path: nudge, never block (see the comment there).
         if (!handlers.isStarted()) {
           if (!chatIsEmpty()) return;
-          e.preventDefault();
-          e.stopImmediatePropagation();
           handlers.onBlockedAttempt();
           return;
         }
@@ -910,5 +935,17 @@ const ZSProvider = (() => {
     // actions
     attachImages, clearAttachments, openNewChat, conversationKey,
     installSendHooks, findToolBlockSpot,
+    promptExtra: PROMPT_EXTRA,
+    // ChatGPT summarises its own context aggressively and loses the "an
+    // extension executes this" part, then refuses to call commands at all. No
+    // other provider has shown this, so no other provider sets these - they
+    // stay on the single bootstrap prompt.
+    resendSystemEvery: 6,   // user turns between re-statements
+    // Ceiling for "result + system-prompt rider". Measured against the real cap
+    // (SEND_HARD_CAP) rather than our 120k perf cap: the rider is added AFTER
+    // truncateForSend, so budgeting at 120k would needlessly defer the rider for
+    // every result over ~109k even though ChatGPT would accept the pair fine.
+    // The margin absorbs the rider growing with a long user custom prompt.
+    sendCharBudget: SEND_HARD_CAP - 4000,
   };
 })();

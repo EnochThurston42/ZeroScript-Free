@@ -10,6 +10,12 @@ const ZS = (() => {
   // content script can reliably recognise (and camouflage) the bootstrap turn.
   const APP_NAME = "ZeroScript";
   const SYS_MARKER = "⟦ZS-SYS⟧";
+  // A re-statement of the system prompt mid-session (see withSysResend in
+  // core/main.js). It carries SYS_MARKER TOO - that is what drives camouflage
+  // and session detection, and neither should change - plus this second marker,
+  // purely so the chip can say "Reminder" instead of inheriting the bootstrap's
+  // "Starting Up". Same content, different label: a re-injection is not a start.
+  const RESEND_MARKER = "⟦ZS-RE⟧";
 
   // ── Tool → visual category (icon + colour theme for the chips) ─────────
   // Roblox Studio MCP only. Returns one of:
@@ -95,6 +101,17 @@ const ZS = (() => {
       "the MCP server (Assistant settings). Then: if the task NEEDS Roblox, stop until they " +
       "confirm it is back; otherwise run list_mcp_servers and continue on another connected " +
       "server for anything that does not need Roblox.",
+    // The page outlived the extension build it was running (reload / auto-update
+    // / disable+enable). Nothing here can recover it - only a page reload can -
+    // so the model must NOT be told the bridge is down and must NOT retry, or it
+    // burns the whole conversation re-issuing commands that can never run. See
+    // isContextInvalidated in core/main.js.
+    staleExtension:
+      "ERROR: the ZeroScript extension was reloaded or updated while this page was open, so this " +
+      "tab is running a version of it that no longer exists and NO command can reach the user's " +
+      "machine from here. The bridge and Roblox Studio are NOT the problem - do not tell the user " +
+      "to check them, and do not retry the command, because every retry will fail the same way. " +
+      "Tell the user in one short sentence to RELOAD THIS PAGE (F5), then stop and wait.",
     bridgeOffline:
       "ERROR: the local ZeroScript bridge is unreachable, so no command could run. " +
       "This is an environment problem on the user's machine (the bridge is not " +
@@ -128,12 +145,19 @@ const ZS = (() => {
   // `${toolsString}` is filled in with the live command list.
   //
   // `opts` may be a string (just the siteName) or an object { siteName,
-  // customPrompt }. `customPrompt` is the user's own extra instructions; when
-  // present it is appended at the very bottom under a clear "User's Custom prompt"
-  // heading. It NEVER edits the prompt above - it only adds a layer below it.
+  // customPrompt, providerNotes }. `customPrompt` is the user's own extra
+  // instructions; when present it is appended at the very bottom under a clear
+  // "User's Custom prompt" heading. It NEVER edits the prompt above - it only
+  // adds a layer below it.
+  //
+  // `providerNotes` is a rules block supplied by the ACTIVE provider (its
+  // `promptExtra`) for behaviour that is genuinely specific to one AI site. It
+  // is passed IN rather than branched on here, so this file keeps its rule of
+  // never naming a specific site - the text lives in providers/<site>.js and
+  // every other provider is untouched by definition.
   function buildSystemPrompt(opts = {}) {
     if (typeof opts === "string") opts = { siteName: opts };
-    const { siteName = "this AI site", customPrompt = "" } = opts;
+    const { siteName = "this AI site", customPrompt = "", providerNotes = "" } = opts;
 
     const prompt = `CONTEXT: the user has installed a browser extension called ZeroScript in their own browser. Here is how it works, so you can use it on their behalf:
 A browser extension (ZeroScript) is running inside this page. It watches your replies. When it detects a ZeroScript command in your text, it runs it against one or more connected MCP servers and sends the result back as the next message. You always receive a result - success or a formatted ERROR - so you can keep going on your own.
@@ -174,6 +198,7 @@ RULES:
 - BUILD UI/OBJECTS FIRST, THEN SCRIPT THEM: create instances with execute_luau, then a Script/LocalScript that finds them via WaitForChild(name, timeout). Use runtime Instance.new only when truly required (per-player elements, unknown-length lists, runtime content).
 - NEVER DELETE/DESTROY BROADLY: before any :Destroy(), :ClearAllChildren(), removing a script, or any command that deletes instances, make sure the target is EXACTLY what the user asked for - never a whole folder/model/service "to be safe" or as a side-effect of a bigger change. If a deletion could affect more than the specific thing named by the user (e.g. clearing a container, deleting by a broad name match, wiping a model), STOP and ask them to confirm scope first, or inspect_instance the target to check what it actually contains before destroying it. Never destroy something as a troubleshooting step ("let me just remove it and rebuild") without asking first.
 - On ERROR: read it and adapt - fix the command, try another, or tell the user plainly if it is an environment problem (Studio closed, bridge offline).
+- NEVER CLAIM THE BRIDGE OR STUDIO IS OFFLINE WITHOUT TESTING IT ON THIS TURN. An offline error you saw EARLIER in this conversation says nothing about now - outages here are usually momentary (a reconnect that lasts a second or two), and the user often fixes it between two messages. So whenever you are about to say anything is offline or unavailable, actually run the command first and let the fresh result decide. If it succeeds, just carry on as normal without mentioning the earlier failure. Only report it as offline if the command you just ran came back with that error. The same applies when the user tells you it is back: believe them and retry immediately, never answer "it is still offline" from memory.
 - On a property/attribute/value error (e.g. "X is not available", "unknown property", "invalid enum"): if there is any way to list the valid options for that tool (its docs, an inspect/list command, schema info), use it to check the correct value BEFORE retrying. Never guess blindly a second time.
 
 ━━━ PROJECT MEMORY (persistent notes about THIS project) ━━━
@@ -201,6 +226,12 @@ This extension gives you real, live access to the user's Roblox Studio project t
 
 IMPORTANT: Your very first action is to write \`list_commands\` with no params (this defaults to the Roblox Studio server) to get the full command reference with parameter details - never guess a command name or parameter that wasn't in that result. Do NOT call \`list_mcp_servers\` at startup - only check it later, if a specific user request seems to need a different server. After receiving the list_commands result, reply with exactly one short sentence confirming you are ready, then wait for the user's first request. (Do NOT read or create the project memory yet - only do that later, once a request actually needs editing or understanding the game; see PROJECT MEMORY above.) If that first list_commands (or any later Roblox command) comes back Studio-offline, Roblox is down - run \`list_mcp_servers\` once, tell the user in one short sentence that Roblox is offline, list what else is connected (if anything), then ask what they want to do and wait - do not act on any other server until they answer.`;
 
+    // Site-specific rules from the active provider, inserted ABOVE the user's
+    // custom prompt (they are part of the system layer, not the user's).
+    const siteRules = providerNotes.trim()
+      ? `\n\n━━━ ADDITIONAL RULES FOR THIS SITE ━━━\n${providerNotes.trim()}`
+      : "";
+
     // The user's own extra instructions, appended as a layer UNDER the system
     // prompt. Optional - empty by default. It cannot change the rules above.
     const extra = customPrompt.trim()
@@ -208,7 +239,7 @@ IMPORTANT: Your very first action is to write \`list_commands\` with no params (
       : "";
 
     // The marker leads the prompt; it tags the bootstrap turn for camouflage.
-    return `${SYS_MARKER}\n${prompt}${extra}`;
+    return `${SYS_MARKER}\n${prompt}${siteRules}${extra}`;
   }
 
   // ── Curated, TESTED usage notes per command ─────────────────────────────────
@@ -314,6 +345,7 @@ IMPORTANT: Your very first action is to write \`list_commands\` with no params (
   return {
     APP_NAME,
     SYS_MARKER,
+    RESEND_MARKER,
     FEEDBACK,
     toolCategory,
     buildSystemPrompt,
