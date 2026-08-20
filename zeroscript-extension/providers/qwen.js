@@ -1008,7 +1008,7 @@ const ZSProvider = (() => {
   }
   function currentModelSupportsVision() {
     const nm = currentModelName();
-    if (!nm) return false;                 // selector unreadable → conservative
+    if (!nm) return true;                 // selector unreadable → default to multimodal on modern Qwen
     if (modelVis.has(nm)) return !!modelVis.get(nm);
     const norm = normModel(nm);
     for (const [k, v] of modelVis.entries()) {
